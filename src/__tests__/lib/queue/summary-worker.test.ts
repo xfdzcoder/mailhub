@@ -1,3 +1,4 @@
+jest.mock('@/lib/ai/agent-tracker', () => ({ updateAgentStep: jest.fn(), completeAgentRun: jest.fn(), failAgentRun: jest.fn() }));
 import { executeSummaryRun } from '../../../lib/queue/workers/summary';
 import { prisma } from '../../../lib/db/prisma';
 import { meilisearch } from '../../../lib/search/meilisearch';
@@ -19,6 +20,8 @@ jest.mock('bullmq', () => ({
 
 jest.mock('../../../lib/db/prisma', () => ({
   prisma: {
+    systemPreference: { upsert: jest.fn() },
+    organizationMember: { findUnique: jest.fn() },
     emailSummaryRun: {
       findUnique: jest.fn(),
       update: jest.fn(),
@@ -55,6 +58,8 @@ jest.mock('../../../lib/ai/summary-service', () => ({
 describe('Email Summary Worker', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (prisma.systemPreference.upsert as jest.Mock).mockResolvedValue({ isAiEnabled: true, semanticSearchEnabled: true });
+    (prisma.organizationMember.findUnique as jest.Mock).mockResolvedValue({ semanticSearchEnabled: true });
   });
 
   test('queries Meilisearch for matching email IDs and summarizes fetched emails', async () => {

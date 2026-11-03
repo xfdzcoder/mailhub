@@ -1,0 +1,51 @@
+# Disposable CI-only services; no host ports or production credentials.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mailhub
+      POSTGRES_PASSWORD: ci-only-password
+      POSTGRES_DB: mailhub
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U mailhub -d mailhub']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  meilisearch:
+    image: getmeili/meilisearch:v1.56.0
+    environment:
+      MEILI_MASTER_KEY: ci-only-meilisearch-key
+      MEILI_ENV: development
+      MEILI_NO_ANALYTICS: 'true'
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://127.0.0.1:7700/health >/dev/null']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  migrate:
+    image: ${MIGRATION_IMAGE:-mailhub-smoke:migrate}
+    environment:
+      DATABASE_URL: postgresql://mailhub:ci-only-password@postgres:5432/mailhub
+  web:
+    image: ${RUNTIME_IMAGE:-mailhub-smoke:runtime}
+    environment: &app-env
+      DATABASE_URL: postgresql://mailhub:ci-only-password@postgres:5432/mailhub
+      REDIS_URL: redis://redis:6379
+      MEILISEARCH_HOST: http://meilisearch:7700
+      MEILISEARCH_API_KEY: ci-only-meilisearch-key
+      JWT_SECRET: ci-only-jwt-secret-at-least-thirty-two-characters
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      WORKER_PARTITION: default
+    init: true
+  worker:
+    image: ${RUNTIME_IMAGE:-mailhub-smoke:runtime}
+    command: [npm, run, worker]
+    environment: *app-env
+    init: true
