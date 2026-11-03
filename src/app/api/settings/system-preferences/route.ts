@@ -11,10 +11,16 @@ import { configureEmailEmbedder } from '@/lib/search/meilisearch';
 
 export const maxDuration = 300;
 
-async function authorizeOrganizationAdmin(
+async function authorizeInstanceAdmin(
   organizationId: string,
   userId: string
 ): Promise<boolean> {
+  const provisionedIds = (process.env.INSTANCE_ADMIN_USER_IDS ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (!provisionedIds.includes(userId)) return false;
+
   const membership = await prisma.organizationMember.findUnique({
     where: {
       organizationId_userId: { organizationId, userId },
@@ -29,8 +35,8 @@ export async function GET(req: NextRequest) {
   const auth = await authenticate(req);
   if (auth instanceof Response) return auth;
 
-  if (!(await authorizeOrganizationAdmin(auth.organizationId, auth.userId))) {
-    return apiError('Organization admin access required', 403);
+  if (!(await authorizeInstanceAdmin(auth.organizationId, auth.userId))) {
+    return apiError('Instance administrator access required', 403);
   }
 
   return apiResponse(await getSystemPreferences());
@@ -40,8 +46,8 @@ export async function PUT(req: NextRequest) {
   const auth = await authenticate(req);
   if (auth instanceof Response) return auth;
 
-  if (!(await authorizeOrganizationAdmin(auth.organizationId, auth.userId))) {
-    return apiError('Organization admin access required', 403);
+  if (!(await authorizeInstanceAdmin(auth.organizationId, auth.userId))) {
+    return apiError('Instance administrator access required', 403);
   }
 
   const body: unknown = await req.json().catch(() => null);

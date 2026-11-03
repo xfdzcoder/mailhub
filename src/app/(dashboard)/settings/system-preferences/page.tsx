@@ -48,11 +48,13 @@ export default function SystemPreferencesPage() {
     data: preferences,
     isLoading,
     isError,
+    error,
   } = useQuery<SystemPreferences>({
     queryKey: ['system-preferences'],
     enabled: isAdmin,
     queryFn: async () => {
       const response = await fetch('/api/settings/system-preferences');
+      if (response.status === 403) throw new Error('Instance administrator access required');
       if (!response.ok) throw new Error('Failed to load system preferences');
       return response.json();
     },
@@ -87,6 +89,17 @@ export default function SystemPreferencesPage() {
 
   if (!isAdmin) {
     return <RestrictedSettingsNotice sectionName="system preferences" />;
+  }
+
+  if (error?.message === 'Instance administrator access required') {
+    return (
+      <section className="rounded-xl border border-gray-200 bg-white p-6" role="alert">
+        <h1 className="text-lg font-semibold">Instance administrator access required</h1>
+        <p className="mt-2 text-sm text-gray-500">
+          These settings affect every organization. Organization administrators can manage their own organization settings.
+        </p>
+      </section>
+    );
   }
 
   return (
