@@ -7,6 +7,10 @@ import { apiError, apiResponse } from '@/lib/auth/middleware';
 import { createOrganizationSlug } from '@/lib/identifiers';
 
 export async function POST(req: NextRequest) {
+  if (process.env.REGISTRATION_MODE !== 'open') {
+    return apiError('Self-registration is closed. Contact your instance administrator.', 403);
+  }
+
   try {
     const body = await req.json();
     const parsed = registerSchema.safeParse(body);
