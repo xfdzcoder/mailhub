@@ -51,6 +51,7 @@ function createClient() {
     logout: jest.fn().mockResolvedValue(undefined),
     getMailboxLock: jest.fn().mockResolvedValue({ release }),
     idle,
+    list: jest.fn().mockResolvedValue([{ path: "INBOX", specialUse: "\\Inbox" }, { path: "Junk", specialUse: "\\Junk" }]),
     search: jest.fn().mockResolvedValue([]),
     on: jest.fn((event: string, handler: EventHandler) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -214,9 +215,9 @@ describe('IMAP reconnect and reconciliation lifecycle', () => {
     (prisma.emailAccount.findUnique as jest.Mock).mockResolvedValue({ lastSyncedAt });
 
     await (manager as any).registerConnection(account, client, 0);
-    const firstRun = (manager as any).reconcileInbox('account-1');
+    const firstRun = (manager as any).reconcileRecentMailboxes('account-1');
     await searchStarted;
-    const overlappingRun = (manager as any).reconcileInbox('account-1');
+    const overlappingRun = (manager as any).reconcileRecentMailboxes('account-1');
 
     expect(client.search).toHaveBeenCalledWith(
       { since: new Date('2026-08-25T12:00:00.000Z') },
@@ -249,15 +250,15 @@ describe('IMAP reconnect and reconciliation lifecycle', () => {
       .spyOn(manager as any, 'fetchNewEmailsForAccount')
       .mockResolvedValue({ processed: 1, failed: 0 });
 
-    await (manager as any).reconcileInbox('account-1');
-    await (manager as any).reconcileInbox('account-1');
+    await (manager as any).reconcileRecentMailboxes('account-1');
+    await (manager as any).reconcileRecentMailboxes('account-1');
 
     expect(prisma.emailAccount.update).toHaveBeenCalledWith({
       where: { id: 'account-1' },
       data: { lastSyncedAt: cutoff },
     });
     expect(client.search).toHaveBeenNthCalledWith(
-      2,
+      3,
       { since: new Date('2026-08-25T12:00:00.000Z') },
       { uid: true }
     );
