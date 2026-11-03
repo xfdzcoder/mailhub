@@ -6,6 +6,9 @@ jest.mock('@/lib/auth/middleware', () => ({
 
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
+    systemPreference: { upsert: jest.fn() },
+    experimentSetting: { findUnique: jest.fn() },
+    organizationMember: { findUnique: jest.fn() },
     emailAccount: {
       findFirst: jest.fn(),
     },
@@ -31,6 +34,9 @@ const mockFindEmail = prisma.email.findUnique as jest.Mock;
 describe('AI API Routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (prisma.systemPreference.upsert as jest.Mock).mockResolvedValue({ isAiEnabled: true, semanticSearchEnabled: true });
+    (prisma.experimentSetting.findUnique as jest.Mock).mockResolvedValue({ isAiEnabled: true, aiProvider: "openai", aiApiKey: "test-key", aiModelName: "test-model" });
+    (prisma.organizationMember.findUnique as jest.Mock).mockResolvedValue({ personalAiEnabled: true });
     mockAuthenticate.mockResolvedValue({
       userId: 'member-1',
       organizationId: 'org-1',
