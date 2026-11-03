@@ -14,6 +14,7 @@ model User {
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
+  sessions       AuthSession[]
   memberships    OrganizationMember[]
   activityLogs   EmailActivityLog[]
   favouriteAccounts FavouriteAccount[]
@@ -29,6 +30,7 @@ model Organization {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
+  sessions           AuthSession[]
   members            OrganizationMember[]
   emailAccounts      EmailAccount[]
   labels             Label[]
@@ -390,4 +392,28 @@ model SystemPreference {
   updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   @@map("system_preferences")
+}
+
+// Additive storage only. Authentication adopts this model in a separate change.
+model AuthSession {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  refreshTokenHash  String    @unique @map("refresh_token_hash") @db.VarChar(64)
+  familyId          String    @map("family_id") @db.Uuid
+  tokenVersion      Int       @default(0) @map("token_version")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  expiresAt         DateTime  @map("expires_at") @db.Timestamptz
+  absoluteExpiresAt DateTime  @map("absolute_expires_at") @db.Timestamptz
+  revokedAt         DateTime? @map("revoked_at") @db.Timestamptz
+  rotatedAt         DateTime? @map("rotated_at") @db.Timestamptz
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([organizationId, userId])
+  @@index([familyId])
+  @@index([absoluteExpiresAt])
+  @@map("auth_sessions")
 }
