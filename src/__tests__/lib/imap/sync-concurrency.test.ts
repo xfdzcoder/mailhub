@@ -98,7 +98,7 @@ describe('IMAP persistence concurrency', () => {
       reconnectAttempts: 0,
     });
     (prisma.email.findMany as jest.Mock).mockResolvedValueOnce([
-      { uid: BigInt(1), messageId: 'existing@example.test' },
+      { uid: BigInt(1), messageId: 'existing@example.test', folder: 'INBOX' },
     ]);
     const persistEmail = jest
       .spyOn(manager as any, 'persistEmail')

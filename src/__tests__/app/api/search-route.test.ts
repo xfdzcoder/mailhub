@@ -4,6 +4,8 @@ jest.mock('@/lib/auth/middleware', () => ({
 
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
+    systemPreference: { upsert: jest.fn() },
+    organizationMember: { findUnique: jest.fn() },
     emailAccount: {
       findMany: jest.fn(),
     },
@@ -36,6 +38,8 @@ function createSearchRequest(url: string): NextRequest {
 describe('GET /api/emails/search', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (prisma.systemPreference.upsert as jest.Mock).mockResolvedValue({ isAiEnabled: true, semanticSearchEnabled: true });
+    (prisma.organizationMember.findUnique as jest.Mock).mockResolvedValue({ semanticSearchEnabled: true });
   });
 
   it('returns an empty result for a member with zero accessible accounts without querying Meilisearch', async () => {

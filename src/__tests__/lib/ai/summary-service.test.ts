@@ -1,3 +1,4 @@
+jest.mock('@/lib/db/prisma', () => ({ prisma: { systemPreference: { upsert: jest.fn().mockResolvedValue({ isAiEnabled: true }) }, experimentSetting: { findUnique: jest.fn().mockResolvedValue(null) } } }));
 import { generateEmailBatchSummary } from '../../../lib/ai/summary-service';
 
 describe('AI LLM Email Summarization Service', () => {
@@ -6,7 +7,7 @@ describe('AI LLM Email Summarization Service', () => {
   });
 
   afterEach(() => {
-    jest.resetAllMocks();
+    jest.clearAllMocks();
   });
 
   test('returns fallback string when email list is empty', async () => {
