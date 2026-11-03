@@ -10,6 +10,11 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci
 RUN npx prisma generate
 
+# Dedicated migration image: the web/worker runtime stays free of Prisma CLI.
+FROM deps AS migrate
+COPY prisma.config.ts ./prisma.config.ts
+CMD ["npx", "--no-install", "prisma", "migrate", "deploy"]
+
 # Build
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
@@ -36,7 +41,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 # We need tsx to run the worker if running in worker mode
 # Doing this before copying source code caches this layer
-RUN npm install -g tsx
+RUN npm install -g tsx@4.23.13
 
 # Copy standalone files and static/public assets
 COPY --from=builder /app/.next/standalone ./

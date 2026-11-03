@@ -19,3 +19,7 @@ Dockerfile
 docker-compose.yml
 docs/
 scripts/
+
+# Exclude every local env variant, preserving only the public template.
+.env.*
+!.env.example
