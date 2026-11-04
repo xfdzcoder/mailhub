@@ -1,3 +1,4 @@
+import { getRuleRegexError, withRuleRegexStatus } from '@/lib/rules/regex';
 import { NextResponse, NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { authenticate, requireAdmin } from '@/lib/auth/middleware';
@@ -80,7 +81,7 @@ export async function GET(
       return NextResponse.json({ error: 'Rule not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ rule });
+    return NextResponse.json({ rule: withRuleRegexStatus(rule) });
   } catch (error) {
     console.error('Get rule error:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
@@ -124,6 +125,11 @@ export async function PUT(
       conditions,
       actions,
     } = result.data;
+
+    const validationError = getRuleRegexError(conditions ?? existing.conditions);
+    if (validationError && (conditions !== undefined || isActive === true)) {
+      return NextResponse.json({ error: validationError }, { status: 400 });
+    }
 
     const accountIdProvided = Object.prototype.hasOwnProperty.call(result.data, 'accountId');
     const accountLabelIdProvided = Object.prototype.hasOwnProperty.call(result.data, 'accountLabelId');
@@ -191,7 +197,7 @@ export async function PUT(
       },
     });
 
-    return NextResponse.json({ rule });
+    return NextResponse.json({ rule: withRuleRegexStatus(rule) });
   } catch (error) {
     console.error('Update rule error:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });

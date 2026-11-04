@@ -729,3 +729,36 @@ describe('Email Rules API Routes', () => {
     });
   });
 });
+
+describe('Rule regex compatibility policy', () => {
+  const unsupported = { matchType: 'ANY', criteria: [{ field: 'subject', operator: 'matches_regex', value: '(invoice)\\1' }] };
+  const request = (url: string, body: unknown) => new Request(`http://localhost${url}`, {
+    method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' },
+  }) as NextRequest;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockAuthenticate.mockResolvedValue({ userId: 'user-123', organizationId: 'org-456', role: 'admin' });
+  });
+  it('rejects unsupported syntax before creating or testing a rule', async () => {
+    const rule = { name: 'Fixture', conditions: unsupported, actions: {} };
+    expect((await createRule(request('/api/rules', rule))).status).toBe(400);
+    expect(mockPrismaRule.create).not.toHaveBeenCalled();
+    expect((await testRule(request('/api/rules/test', { rule, sampleEmail: { subject: 'invoice' } }))).status).toBe(400);
+  });
+  it('marks incompatible existing rules inactive in list and detail responses', async () => {
+    const rule = { id: 'rule-1', isActive: true, conditions: unsupported };
+    mockPrismaRule.findMany.mockResolvedValue([rule]);
+    mockPrismaRule.findFirst.mockResolvedValue(rule);
+    const list = await (await getRules(request('/api/rules', {}))).json();
+    const detail = await (await getRule(request('/api/rules/rule-1', {}), { params: Promise.resolve({ id: 'rule-1' }) })).json();
+    expect(list.rules[0]).toMatchObject({ isActive: false, validationError: expect.any(String) });
+    expect(detail.rule).toMatchObject({ isActive: false, validationError: expect.any(String) });
+  });
+  it('rejects enabling or manually running an incompatible stored rule', async () => {
+    mockPrismaRule.findFirst.mockResolvedValue({ id: 'rule-1', isActive: true, conditions: unsupported });
+    expect((await updateRule(request('/api/rules/rule-1', { isActive: true }), { params: Promise.resolve({ id: 'rule-1' }) })).status).toBe(400);
+    expect(mockPrismaRule.update).not.toHaveBeenCalled();
+    expect((await runRule(request('/api/rules/rule-1/run', {}), { params: Promise.resolve({ id: 'rule-1' }) })).status).toBe(400);
+    expect(mockPrismaEmail.findMany).not.toHaveBeenCalled();
+  });
+});
