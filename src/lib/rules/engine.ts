@@ -1,3 +1,4 @@
+import { getRuleRegexError, testRuleRegex } from './regex';
 import {
   EmailEvaluationInput,
   EmailRuleDefinition,
@@ -143,12 +144,7 @@ export function evaluateCriterion(
       return targetTexts.some((text) => text.endsWith(strVal));
 
     case 'matches_regex':
-      try {
-        const regex = new RegExp(strVal, 'i');
-        return targetTexts.some((text) => regex.test(text));
-      } catch {
-        return false;
-      }
+      return targetTexts.some((text) => testRuleRegex(String(value), text));
 
     default:
       return false;
@@ -162,7 +158,7 @@ export function evaluateRule(
   email: EmailEvaluationInput,
   rule: EmailRuleDefinition
 ): boolean {
-  if (!rule.isActive) return false;
+  if (!rule.isActive || getRuleRegexError(rule.conditions)) return false;
 
   // Account Scope check
   if (rule.accountId && rule.accountId !== email.accountId) {
