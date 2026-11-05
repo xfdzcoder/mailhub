@@ -48,11 +48,12 @@ export default function SystemPreferencesPage() {
     data: preferences,
     isLoading,
     isError,
-  } = useQuery<SystemPreferences>({
+  } = useQuery<SystemPreferences | null>({
     queryKey: ['system-preferences'],
     enabled: isAdmin,
     queryFn: async () => {
       const response = await fetch('/api/settings/system-preferences');
+      if (response.status === 403) return null;
       if (!response.ok) throw new Error('Failed to load system preferences');
       return response.json();
     },
@@ -85,8 +86,8 @@ export default function SystemPreferencesPage() {
     return <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-accent-600" /></div>;
   }
 
-  if (!isAdmin) {
-    return <RestrictedSettingsNotice sectionName="system preferences" />;
+  if (!isAdmin || preferences === null) {
+    return <RestrictedSettingsNotice sectionName="system preferences" instanceAccess />;
   }
 
   return (

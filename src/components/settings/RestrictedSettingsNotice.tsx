@@ -3,8 +3,10 @@ import { ShieldAlert } from 'lucide-react';
 
 export function RestrictedSettingsNotice({
   sectionName,
+  instanceAccess = false,
 }: {
   sectionName: string;
+  instanceAccess?: boolean;
 }) {
   return (
     <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-6 shadow-sm">
@@ -15,10 +17,12 @@ export function RestrictedSettingsNotice({
         <div className="space-y-3">
           <div>
             <h1 className="text-xl font-semibold text-gray-900">
-              Admin access required
+              {instanceAccess ? 'Instance administrator access required' : 'Admin access required'}
             </h1>
             <p className="mt-1 text-sm text-gray-600">
-              Only administrators can access {sectionName}. You can still manage
+              {instanceAccess
+                ? `Access to ${sectionName} requires explicit provisioning by the deployment operator and current organization administrator membership. Contact your deployment operator for access.`
+                : `Only administrators can access ${sectionName}.`} You can still manage
               your email accounts, label assignment, signatures, preferences, and
               security settings.
             </p>
