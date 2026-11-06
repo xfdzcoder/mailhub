@@ -1,3 +1,4 @@
+import { protectSensitive } from '@/lib/auth/attempts';
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { authenticate, apiResponse, apiError } from '@/lib/auth/middleware';
@@ -6,7 +7,7 @@ import { compare, hash } from 'bcryptjs';
 import { changeUserPassword } from '@/lib/auth/sessions';
 import { clearSessionCookies } from '@/lib/auth/cookies';
 
-export async function PUT(req: NextRequest) {
+async function handlePUT(req: NextRequest) {
   const auth = await authenticate(req);
   if (auth instanceof Response) return auth;
 
@@ -26,13 +27,13 @@ export async function PUT(req: NextRequest) {
     });
 
     if (!user) {
-      return apiError('User not found', 404);
+      return apiError('Invalid email or password', 401);
     }
 
     // Verify current password
     const isPasswordValid = await compare(currentPassword, user.passwordHash);
     if (!isPasswordValid) {
-      return apiError('Incorrect current password', 400);
+      return apiError('Invalid email or password', 401);
     }
 
     // Hash and save new password
@@ -45,3 +46,5 @@ export async function PUT(req: NextRequest) {
     return apiError('Failed to change password', 500);
   }
 }
+
+export const PUT = protectSensitive('password', handlePUT);

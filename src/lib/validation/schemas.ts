@@ -6,18 +6,18 @@ import { normalizeEmailAddress } from '@/lib/email/addresses';
 export const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
   name: z.string().min(1, 'Name is required').max(255),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: z.string().min(8, 'Password must be at least 8 characters').refine(value => new TextEncoder().encode(value).length <= 72, 'Password must be at most 72 UTF-8 bytes'),
   organizationName: z.string().min(1, 'Organization name is required').max(255),
 });
 
 export const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
-  password: z.string().min(1, 'Password is required'),
+  password: z.string().min(1, 'Password is required').refine(value => new TextEncoder().encode(value).length <= 4096, 'Password must be at most 4096 UTF-8 bytes'),
 });
 
 export const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1, 'Current password is required'),
-  newPassword: z.string().min(8, 'New password must be at least 8 characters'),
+  currentPassword: z.string().min(1, 'Current password is required').refine(value => new TextEncoder().encode(value).length <= 4096, 'Password must be at most 4096 UTF-8 bytes'),
+  newPassword: z.string().min(8, 'New password must be at least 8 characters').refine(value => new TextEncoder().encode(value).length <= 72, 'Password must be at most 72 UTF-8 bytes'),
 });
 
 // --- Organization schemas ---
@@ -29,7 +29,7 @@ export const updateOrgSchema = z.object({
 export const createUserSchema = z.object({
   email: z.string().email(),
   name: z.string().min(1, 'Name is required').max(255),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: z.string().min(8, 'Password must be at least 8 characters').refine(value => new TextEncoder().encode(value).length <= 72, 'Password must be at most 72 UTF-8 bytes'),
   role: z.enum(['admin', 'member']).default('member'),
 });
 

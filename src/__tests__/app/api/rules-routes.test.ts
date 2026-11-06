@@ -1,3 +1,9 @@
+// Endpoint fixtures isolate Redis; distributed policy is exercised separately.
+jest.mock('ioredis', () => class {
+  on() { return this; }
+  async eval() { return 1; }
+  async zrem() { return 1; }
+});
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
   requireAdmin: jest.fn((auth: { role: string }) =>

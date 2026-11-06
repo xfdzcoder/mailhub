@@ -1,3 +1,4 @@
+import { protectSensitive } from '@/lib/auth/attempts';
 import { NextRequest } from 'next/server';
 import { ImapFlow } from 'imapflow';
 import { createTransport } from 'nodemailer';
@@ -16,7 +17,7 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
-export async function POST(req: NextRequest, { params }: RouteParams) {
+async function handlePOST(req: NextRequest, { params }: RouteParams) {
   const auth = await authenticate(req);
   if (auth instanceof Response) return auth;
 
@@ -88,3 +89,5 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return apiError('Account not found', 404);
   }
 }
+
+export const POST = protectSensitive('test', handlePOST);

@@ -1,3 +1,4 @@
+import { protectAuthentication } from '@/lib/auth/attempts';
 import { NextRequest } from 'next/server';
 import { compare } from 'bcryptjs';
 import { prisma } from '@/lib/db/prisma';
@@ -6,13 +7,13 @@ import { setSessionCookies } from '@/lib/auth/cookies';
 import { loginSchema } from '@/lib/validation';
 import { apiError, apiResponse } from '@/lib/auth/middleware';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const body = await req.json();
     const parsed = loginSchema.safeParse(body);
 
     if (!parsed.success) {
-      return apiError(parsed.error.issues[0].message, 422);
+      return apiError('Invalid email or password', 401);
     }
 
     const { email, password } = parsed.data;
@@ -27,13 +28,14 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    if (!user || user.disabledAt || !(await compare(password, user.passwordHash))) {
+    const valid = await compare(password, user?.passwordHash || '$2b$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW');
+    if (!user || user.disabledAt || !valid) {
       return apiError('Invalid email or password', 401);
     }
 
     const membership = user.memberships[0];
     if (!membership) {
-      return apiError('No organization found for this user', 403);
+      return apiError('Invalid email or password', 401);
     }
 
     const payload = {
@@ -61,3 +63,5 @@ export async function POST(req: NextRequest) {
     return apiError('Internal server error', 500);
   }
 }
+
+export const POST = protectAuthentication('login', handlePOST);
