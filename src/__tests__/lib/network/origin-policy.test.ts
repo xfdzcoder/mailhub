@@ -154,3 +154,35 @@ it('never consumes notification approval for a model request', async () => {
     await expect(resolveModelTarget(modelUrl('http://unapproved'), jest.fn())).rejects.toThrow();
   } finally { delete process.env.NOTIFICATION_ORIGIN_POLICY; }
 });
+
+it.each(['ok', 'redirect', 'large', 'slow'])('bounds push transport against controlled HTTPS sink: %s', async mode => {
+  const dir = mkdtempSync(join(tmpdir(), 'push-tls-'));
+  let server: ReturnType<typeof https.createServer> | undefined;
+  let count = 0;
+  try {
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+      '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem'), '-subj', '/CN=localhost',
+      '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
+    const cert = readFileSync(join(dir, 'cert.pem'));
+    server = https.createServer({ key: readFileSync(join(dir, 'key.pem')), cert }, (_req, res) => {
+      count++;
+      if (mode === 'ok') { res.writeHead(201); res.end(); }
+      if (mode === 'redirect') { res.writeHead(307, { Location: '/next' }); res.end(); }
+      if (mode === 'large') res.end('x'.repeat(1024));
+    });
+    await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+    const origin = `https://127.0.0.1:${(server.address() as { port: number }).port}`;
+    process.env.PUSH_ORIGIN_POLICY = JSON.stringify([{ origin, addresses: ['127.0.0.1/32'] }]);
+    (https.request as jest.Mock).mockImplementationOnce((url, options, callback) =>
+      jest.requireActual('node:https').request(url, { ...options, ca: cert }, callback));
+    const { postWithPolicy } = await import('@/lib/network/origin-policy');
+    const result = postWithPolicy('push', origin, {}, Buffer.from('synthetic'), { totalMs: 200, connectMs: 100, responseBytes: 64 });
+    if (mode === 'ok') await expect(result).resolves.toEqual({ status: 201, body: '' });
+    else await expect(result).rejects.toThrow();
+    expect(count).toBe(1);
+  } finally {
+    delete process.env.PUSH_ORIGIN_POLICY;
+    if (server) await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
