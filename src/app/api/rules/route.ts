@@ -1,3 +1,4 @@
+import { getRuleRegexError, withRuleRegexStatus } from '@/lib/rules/regex';
 import { NextResponse, NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { authenticate, requireAdmin } from '@/lib/auth/middleware';
@@ -73,7 +74,7 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    return NextResponse.json({ rules });
+    return NextResponse.json({ rules: rules.map(withRuleRegexStatus) });
   } catch (error) {
     console.error('Fetch rules error:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
@@ -105,6 +106,9 @@ export async function POST(req: NextRequest) {
       conditions,
       actions,
     } = result.data;
+
+    const validationError = getRuleRegexError(conditions);
+    if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
 
     if (accountId && accountLabelId) {
       return NextResponse.json(
@@ -163,7 +167,7 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    return NextResponse.json({ rule });
+    return NextResponse.json({ rule: withRuleRegexStatus(rule) });
   } catch (error) {
     console.error('Create rule error:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });

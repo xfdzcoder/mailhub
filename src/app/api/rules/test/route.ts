@@ -1,3 +1,4 @@
+import { getRuleRegexError, MAX_RULE_REGEX_INPUT_LENGTH } from '@/lib/rules/regex';
 import { NextResponse, NextRequest } from 'next/server';
 import { authenticate, requireAdmin } from '@/lib/auth/middleware';
 import { evaluateRule } from '@/lib/rules/engine';
@@ -70,6 +71,12 @@ export async function POST(req: NextRequest) {
     }
 
     const { rule, sampleEmail } = result.data;
+    const validationError = getRuleRegexError(rule.conditions);
+    if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
+    if ([sampleEmail.subject, sampleEmail.bodyText, sampleEmail.fromAddress, sampleEmail.fromName]
+      .some((value) => value && value.length > MAX_RULE_REGEX_INPUT_LENGTH)) {
+      return NextResponse.json({ error: 'Rule test input is too large.' }, { status: 400 });
+    }
 
     const ruleDef: EmailRuleDefinition = {
       name: rule.name || 'Test Rule',

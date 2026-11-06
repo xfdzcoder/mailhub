@@ -220,6 +220,9 @@ export default function RulesSettingsPage() {
                 <div className="space-y-2 flex-1 min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold text-gray-900 text-base">{rule.name}</span>
+                    {rule.validationError && (
+                      <span className="text-xs text-amber-700" role="status">Paused: {rule.validationError}</span>
+                    )}
                     {rule.priority !== undefined && (
                       <span className="text-[11px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded font-mono font-medium">
                         Priority: {rule.priority}
@@ -344,7 +347,7 @@ export default function RulesSettingsPage() {
                   {/* Run Retroactively */}
                   <button
                     onClick={() => handleRunRule(rule.id, rule.name)}
-                    disabled={isRunning}
+                    disabled={isRunning || Boolean(rule.validationError)}
                     className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-lg transition-colors shadow-2xs"
                     title="Run retroactively on existing emails in inbox"
                   >
@@ -362,6 +365,7 @@ export default function RulesSettingsPage() {
                     onClick={() =>
                       toggleActiveMutation.mutate({ id: rule.id, isActive: !rule.isActive })
                     }
+                    disabled={Boolean(rule.validationError) || toggleActiveMutation.isPending}
                     className={clsx(
                       'relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
                       rule.isActive ? 'bg-accent-600' : 'bg-gray-300'

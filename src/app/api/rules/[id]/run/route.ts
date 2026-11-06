@@ -1,3 +1,4 @@
+import { getRuleRegexError } from '@/lib/rules/regex';
 import { NextResponse, NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { authenticate, requireAdmin } from '@/lib/auth/middleware';
@@ -22,6 +23,9 @@ export async function POST(
     if (!ruleRecord) {
       return NextResponse.json({ error: 'Rule not found' }, { status: 404 });
     }
+
+    const validationError = getRuleRegexError(ruleRecord.conditions);
+    if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
 
     const ruleDef: EmailRuleDefinition = {
       id: ruleRecord.id,
