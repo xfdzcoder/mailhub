@@ -1,7 +1,7 @@
 # Fork development CI
 
 The fork validates pushes to `dev`, `fix/**`, `feat/**`, `test/**`, and `ci/**`,
-and pull requests targeting `main` or `dev`. Validation uses Node 20 and runs
+and pull requests targeting `main` or `dev`. Validation uses Node 24 and runs
 `npm ci`, Prisma generation, ESLint, all Jest tests, TypeScript, and Next.js build.
 Manual dispatch requires the workflow to exist on the repository's default branch.
 
@@ -44,3 +44,8 @@ and its volumes are removed on exit. No real mail accounts or deployment secrets
 are required. Missing upstream migrations for signatures, experiment settings,
 notification webhooks, and summary runs remain a separate issue: this test does
 not claim schema completeness or exercise real email synchronization.
+
+Node 24 LTS is the supported baseline for both local CI verification and Docker.
+Node 20 has reached end of life; application rollback should preserve a supported
+runtime rather than silently reverting to an unsupported base. The migration
+target and Web/Worker runtime use the same Node major.

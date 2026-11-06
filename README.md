@@ -156,6 +156,19 @@ Optional worker and database controls use conservative defaults from `.env.examp
 | `IMAP_RECONCILE_INTERVAL_MS` | `300000` | IMAP recovery reconciliation interval |
 | `OUTBOUND_HOST_ALLOWLIST` | empty | Exact `host=cidr` allowlist for reserved/non-public IMAP/SMTP destinations |
 
+### Instance administrator provisioning
+
+System Preferences affects every organization. Access requires both an exact user ID in the server-only `INSTANCE_ADMIN_USER_IDS` deployment allowlist and current administrator membership in the active organization. Organization administration alone does not grant instance access.
+
+1. Create or identify the intended user and explicitly assign organization administrator membership through the existing organization administration process.
+2. Obtain the user's immutable `User.id` from the database (`users.id`) or the authenticated `/api/auth/me` response (`user.id`). Use IDs, not email addresses, organization IDs, or wildcard patterns.
+3. Set the web application's runtime environment, for example `INSTANCE_ADMIN_USER_IDS=user-id-one,user-id-two`. Entries are comma-separated, trimmed, and matched exactly. Keep this variable server-only.
+4. Restart/recreate every web process with the same configuration. For Docker, supply it through the web container's environment or `--env-file`.
+
+An absent, empty, or whitespace-only allowlist denies all instance settings reads and writes. To revoke access, remove the ID and restart the web processes; removing or downgrading the user's active organization membership also blocks access, even with an existing session.
+
+On upgrade, existing organization administrators lose System Preferences access until explicitly provisioned. Existing global values continue to apply, and organization and personal preferences remain saved and accessible under their existing permissions. This policy requires no database migration and grants no roles automatically. The initial `create-admin` command creates an organization administrator only; it does not provision instance access.
+
 ### 3. Start Services
 
 ```bash
