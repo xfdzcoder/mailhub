@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db/prisma';
 import { authenticate, apiResponse, apiError } from '@/lib/auth/middleware';
 import { changePasswordSchema } from '@/lib/validation';
 import { compare, hash } from 'bcryptjs';
+import { changeUserPassword } from '@/lib/auth/sessions';
+import { clearSessionCookies } from '@/lib/auth/cookies';
 
 export async function PUT(req: NextRequest) {
   const auth = await authenticate(req);
@@ -36,12 +38,8 @@ export async function PUT(req: NextRequest) {
     // Hash and save new password
     const newPasswordHash = await hash(newPassword, 12);
     
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { passwordHash: newPasswordHash },
-    });
-
-    return apiResponse({ success: true });
+    await changeUserPassword(user.id, user.passwordHash, newPasswordHash);
+    return clearSessionCookies(apiResponse({ success: true }));
   } catch (error) {
     console.error('Password change error:', error);
     return apiError('Failed to change password', 500);

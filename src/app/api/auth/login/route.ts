@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { compare } from 'bcryptjs';
 import { prisma } from '@/lib/db/prisma';
-import { createToken, createRefreshToken, ACCESS_TOKEN_MAX_AGE, REFRESH_TOKEN_MAX_AGE } from '@/lib/auth/jwt';
+import { createSession, SessionError } from '@/lib/auth/sessions';
+import { setSessionCookies } from '@/lib/auth/cookies';
 import { loginSchema } from '@/lib/validation';
 import { apiError, apiResponse } from '@/lib/auth/middleware';
 
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    if (!user || !(await compare(password, user.passwordHash))) {
+    if (!user || user.disabledAt || !(await compare(password, user.passwordHash))) {
       return apiError('Invalid email or password', 401);
     }
 
@@ -41,10 +42,7 @@ export async function POST(req: NextRequest) {
       role: membership.role as 'admin' | 'member',
     };
 
-    // 7 days Access Token
-    const token = await createToken(payload);
-    // 30 days (1 month) Refresh Token
-    const refreshToken = await createRefreshToken(payload);
+    const pair = await createSession(payload, user.passwordHash);
 
     const response = apiResponse({
       user: { id: user.id, email: user.email, name: user.name },
@@ -56,26 +54,9 @@ export async function POST(req: NextRequest) {
       role: membership.role,
     });
 
-    // Access Token Cookie (7 Days)
-    response.cookies.set('auth-token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: ACCESS_TOKEN_MAX_AGE,
-      path: '/',
-    });
-
-    // Refresh Token Cookie (30 Days / 1 Month)
-    response.cookies.set('refresh-token', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: REFRESH_TOKEN_MAX_AGE,
-      path: '/',
-    });
-
-    return response;
+    return setSessionCookies(response, pair);
   } catch (error) {
+    if (error instanceof SessionError) return apiError('Please log in again', 401);
     console.error('Login error:', error);
     return apiError('Internal server error', 500);
   }

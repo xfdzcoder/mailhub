@@ -1,57 +1,64 @@
 import { SignJWT, jwtVerify } from 'jose';
 import type { JWTPayload } from './types';
 
-function getSecret(): Uint8Array {
-  const secret = process.env.JWT_SECRET;
+function getSecret(refresh = false): Uint8Array {
+  const secret = refresh
+    ? process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET
+    : process.env.JWT_SECRET;
   if (!secret) throw new Error('JWT_SECRET environment variable is required');
-  return new TextEncoder().encode(secret);
+  return new TextEncoder().encode(refresh ? `${secret}_refresh` : secret);
 }
 
-function getRefreshSecret(): Uint8Array {
-  const secret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
-  if (!secret) throw new Error('JWT_SECRET environment variable is required');
-  return new TextEncoder().encode(`${secret}_refresh`);
-}
+export const ACCESS_TOKEN_MAX_AGE = 15 * 60;
+export const REFRESH_TOKEN_MAX_AGE = 7 * 24 * 60 * 60;
+export const ABSOLUTE_SESSION_MAX_AGE = 30 * 24 * 60 * 60;
+export const ACCESS_TOKEN_EXPIRY = '15m';
+export const REFRESH_TOKEN_EXPIRY = '7d';
+export const TOKEN_ISSUER = 'mailhub';
+export const TOKEN_AUDIENCE = 'mailhub:session';
+export type SessionClaims = JWTPayload & { sessionId: string; tokenVersion: number };
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const ACCESS_TOKEN_EXPIRY = '7d';
-export const REFRESH_TOKEN_EXPIRY = '30d';
-export const ACCESS_TOKEN_MAX_AGE = 60 * 60 * 24 * 7;   // 7 days in seconds
-export const REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 30; // 30 days (1 month) in seconds
-
-function getExpiresIn(): string {
-  return process.env.JWT_EXPIRES_IN || ACCESS_TOKEN_EXPIRY;
-}
-
-export async function createToken(payload: JWTPayload): Promise<string> {
-  return new SignJWT({ ...payload, type: 'access' })
-    .setProtectedHeader({ alg: 'HS256' })
+async function sign(payload: SessionClaims, refresh: boolean, expiresAt?: Date) {
+  return new SignJWT({ ...payload, type: refresh ? 'refresh' : 'access' })
+    .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+    .setIssuer(TOKEN_ISSUER)
+    .setAudience(TOKEN_AUDIENCE)
+    .setSubject(payload.userId)
     .setIssuedAt()
-    .setExpirationTime(getExpiresIn())
-    .sign(getSecret());
+    .setExpirationTime(expiresAt ? Math.floor(expiresAt.getTime() / 1000) : Math.floor(Date.now() / 1000) + (refresh ? REFRESH_TOKEN_MAX_AGE : ACCESS_TOKEN_MAX_AGE))
+    .sign(getSecret(refresh));
 }
 
-export async function createRefreshToken(payload: JWTPayload): Promise<string> {
-  return new SignJWT({ ...payload, type: 'refresh' })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuedAt()
-    .setExpirationTime(REFRESH_TOKEN_EXPIRY)
-    .sign(getRefreshSecret());
+export function createToken(payload: SessionClaims, expiresAt?: Date): Promise<string> {
+  return sign(payload, false, expiresAt);
 }
 
-export async function verifyToken(token: string): Promise<JWTPayload> {
-  const { payload } = await jwtVerify(token, getSecret());
+export function createRefreshToken(payload: SessionClaims, expiresAt?: Date): Promise<string> {
+  return sign(payload, true, expiresAt);
+}
+
+async function verify(token: string, refresh: boolean): Promise<SessionClaims> {
+  const { payload } = await jwtVerify(token, getSecret(refresh), {
+    algorithms: ['HS256'], typ: 'JWT', issuer: TOKEN_ISSUER, audience: TOKEN_AUDIENCE,
+    requiredClaims: ['sub', 'iat', 'exp', 'userId', 'organizationId', 'role', 'sessionId', 'tokenVersion', 'type'],
+    maxTokenAge: refresh ? REFRESH_TOKEN_MAX_AGE : ACCESS_TOKEN_MAX_AGE,
+  });
+  if (payload.type !== (refresh ? 'refresh' : 'access') ||
+      !['userId', 'organizationId', 'sessionId'].every(key => typeof payload[key] === 'string' && uuid.test(payload[key] as string)) ||
+      payload.sub !== payload.userId || !['admin', 'member'].includes(payload.role as string) ||
+      !Number.isSafeInteger(payload.tokenVersion) || (payload.tokenVersion as number) < 0 ||
+      typeof payload.iat !== 'number' || typeof payload.exp !== 'number' ||
+      payload.iat > Math.floor(Date.now() / 1000) || payload.exp <= payload.iat ||
+      payload.exp - payload.iat > (refresh ? REFRESH_TOKEN_MAX_AGE : ACCESS_TOKEN_MAX_AGE)) {
+    throw new Error('Invalid session claims');
+  }
   return {
-    userId: payload.userId as string,
-    organizationId: payload.organizationId as string,
-    role: payload.role as 'admin' | 'member',
+    userId: payload.userId as string, organizationId: payload.organizationId as string,
+    role: payload.role as 'admin' | 'member', sessionId: payload.sessionId as string,
+    tokenVersion: payload.tokenVersion as number,
   };
 }
 
-export async function verifyRefreshToken(token: string): Promise<JWTPayload> {
-  const { payload } = await jwtVerify(token, getRefreshSecret());
-  return {
-    userId: payload.userId as string,
-    organizationId: payload.organizationId as string,
-    role: payload.role as 'admin' | 'member',
-  };
-}
+export function verifyToken(token: string): Promise<SessionClaims> { return verify(token, false); }
+export function verifyRefreshToken(token: string): Promise<SessionClaims> { return verify(token, true); }

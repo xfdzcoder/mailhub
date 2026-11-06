@@ -11,6 +11,7 @@ model User {
   email          String    @unique @db.VarChar(255)
   name           String    @db.VarChar(255)
   passwordHash   String    @map("password_hash")
+  disabledAt     DateTime? @map("disabled_at") @db.Timestamptz
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
