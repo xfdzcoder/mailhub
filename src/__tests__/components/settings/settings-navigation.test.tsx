@@ -27,6 +27,7 @@ jest.mock('@/components/settings/SpamSettingsTab', () => ({
 }));
 
 import { renderToStaticMarkup } from 'react-dom/server';
+import SystemPreferencesPage from '@/app/(dashboard)/settings/system-preferences/page';
 import SettingsLayout from '@/app/(dashboard)/settings/layout';
 import MembersPage from '@/app/(dashboard)/settings/members/page';
 import RulesSettingsPage from '@/app/(dashboard)/settings/rules/page';
@@ -171,6 +172,43 @@ describe('Settings navigation and member guards', () => {
       return { data: undefined, isLoading: false };
     });
   }
+
+  it('explains instance provisioning to ordinary members', () => {
+    configureQueries('member');
+    const html = renderToStaticMarkup(<SystemPreferencesPage />);
+    expect(html).toContain('Instance administrator access required');
+    expect(html).toContain('explicit provisioning by the deployment operator');
+    expect(html).not.toContain('role="switch"');
+    expect(queryOptions.find(({ queryKey }) => queryKey[0] === 'system-preferences')?.enabled).toBe(false);
+  });
+
+  it('shows the deployment restriction when an organization admin receives a denial', () => {
+    configureQueries('admin');
+    const queryImplementation = mockUseQuery.getMockImplementation()!;
+    mockUseQuery.mockImplementation((options: QueryOptions) =>
+      options.queryKey[0] === 'system-preferences'
+        ? { data: null, isLoading: false }
+        : queryImplementation(options)
+    );
+    const html = renderToStaticMarkup(<SystemPreferencesPage />);
+    expect(html).toContain('Instance administrator access required');
+    expect(html).toContain('current organization administrator membership');
+    expect(html).not.toContain('role="switch"');
+  });
+
+  it('shows instance controls to an authorized administrator', () => {
+    configureQueries('admin');
+    const queryImplementation = mockUseQuery.getMockImplementation()!;
+    mockUseQuery.mockImplementation((options: QueryOptions) =>
+      options.queryKey[0] === 'system-preferences'
+        ? { data: { isAiEnabled: true, semanticSearchEnabled: false }, isLoading: false }
+        : queryImplementation(options)
+    );
+    const html = renderToStaticMarkup(<SystemPreferencesPage />);
+    expect(html).toContain('Enable AI across organizations');
+    expect(html).toContain('role="switch"');
+    expect(html).not.toContain('Instance administrator access required');
+  });
 
   it('shows admin-only links to admins', () => {
     configureQueries('admin');
