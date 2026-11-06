@@ -1,3 +1,4 @@
+import { protectSensitive } from '@/lib/auth/attempts';
 import { getRuleRegexError, MAX_RULE_REGEX_INPUT_LENGTH } from '@/lib/rules/regex';
 import { NextResponse, NextRequest } from 'next/server';
 import { authenticate, requireAdmin } from '@/lib/auth/middleware';
@@ -56,7 +57,7 @@ const testRuleSchema = z.object({
   }),
 });
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   try {
     const session = await authenticate(req);
     if (session instanceof Response) return session;
@@ -104,3 +105,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
 }
+
+export const POST = protectSensitive('test', handlePOST);
