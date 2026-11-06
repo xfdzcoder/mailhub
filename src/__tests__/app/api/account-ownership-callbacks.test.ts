@@ -13,8 +13,8 @@ jest.mock('@/lib/crypto', () => ({
   encrypt: jest.fn((value: string) => `encrypted:${value}`),
 }));
 
-jest.mock('@/lib/auth/jwt', () => ({
-  verifyToken: jest.fn(),
+jest.mock('@/lib/auth/sessions', () => ({
+  verifySessionToken: jest.fn(),
 }));
 
 jest.mock('@/lib/queue/client', () => ({
@@ -30,7 +30,7 @@ import { GET as googleCallback } from '@/app/api/accounts/oauth/google/callback/
 import { GET as microsoftCallback } from '@/app/api/accounts/oauth/microsoft/callback/route';
 import { prisma } from '@/lib/db/prisma';
 import { encrypt } from '@/lib/crypto';
-import { verifyToken } from '@/lib/auth/jwt';
+import { verifySessionToken as verifyToken } from '@/lib/auth/sessions';
 import { enqueueInitialSync } from '@/lib/queue/client';
 import { createOwnedAccount } from '@/lib/accounts/service';
 

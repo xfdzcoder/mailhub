@@ -24,11 +24,6 @@
       "count": 12
     }
   },
-  "src/__tests__/lib/api-client.test.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 5
-    }
-  },
   "src/__tests__/lib/email/attachment-retrieval.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 4
@@ -238,11 +233,6 @@
     }
   },
   "src/app/api/ai/toolbox/route.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
-  "src/app/api/auth/refresh/route.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
@@ -512,11 +502,6 @@
   "src/lib/ai/agent-tracker.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
-    }
-  },
-  "src/lib/api-client.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 3
     }
   },
   "src/lib/db/prisma.ts": {

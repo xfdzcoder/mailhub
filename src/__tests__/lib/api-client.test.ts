@@ -1,63 +1,89 @@
 import { refreshTokenClient, setupGlobalFetchInterceptor, resetFetchInterceptor } from '@/lib/api-client';
 
-describe('Frontend API Client & Token Refresh Interceptor', () => {
-  beforeEach(() => {
-    resetFetchInterceptor();
-    delete (global as any).window;
-    const mockFetch = jest.fn();
-    (global as any).window = {
-      location: { href: '', pathname: '/inbox', search: '' },
-      fetch: mockFetch,
-    };
-    global.fetch = mockFetch;
+const response = (status: number, code?: string) => Response.json({ code }, { status });
+let fetchMock: jest.Mock;
+beforeEach(() => {
+  resetFetchInterceptor();
+  fetchMock = jest.fn();
+  Object.assign(global, { window: { location: { origin: 'http://localhost', href: '', pathname: '/inbox', search: '' }, fetch: fetchMock } });
+  global.fetch = fetchMock;
+});
+afterEach(() => { resetFetchInterceptor(); jest.restoreAllMocks(); });
+
+it('shares one refresh operation among concurrent requests', async () => {
+  fetchMock.mockResolvedValue(response(200));
+  expect(await Promise.all([refreshTokenClient(), refreshTokenClient(), refreshTokenClient()])).toEqual([true, true, true]);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+it('serializes refresh across tabs using Web Locks when available', async () => {
+  const request = jest.fn(async (_name, callback) => callback());
+  const original = Object.getOwnPropertyDescriptor(global, 'navigator');
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { locks: { request } } });
+  try {
+    fetchMock.mockResolvedValue(response(200));
+    expect(await refreshTokenClient()).toBe(true);
+    expect(request).toHaveBeenCalledWith('mailhub-session-refresh', expect.any(Function));
+  } finally {
+    if (original) Object.defineProperty(global, 'navigator', original);
+    else Reflect.deleteProperty(global, 'navigator');
+  }
+});
+it('refreshes only after an explicit expired response and retries only once', async () => {
+  fetchMock.mockResolvedValueOnce(response(401, 'AUTH_EXPIRED')).mockResolvedValueOnce(response(200)).mockResolvedValueOnce(response(401, 'AUTH_EXPIRED'));
+  setupGlobalFetchInterceptor();
+  expect((await window.fetch('/api/emails')).status).toBe(401);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+});
+it('also refreshes the current-user endpoint', async () => {
+  fetchMock.mockResolvedValueOnce(response(401, 'AUTH_EXPIRED')).mockResolvedValueOnce(response(200)).mockResolvedValueOnce(response(200));
+  setupGlobalFetchInterceptor();
+  expect((await window.fetch('/api/auth/me')).status).toBe(200);
+});
+it.each([undefined, 'UNRELATED'])('does not refresh an ambiguous 401 (%s)', async code => {
+  fetchMock.mockResolvedValue(response(401, code));
+  setupGlobalFetchInterceptor();
+  await window.fetch('/api/emails');
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+it('redirects revoked sessions without trying refresh', async () => {
+  fetchMock.mockResolvedValue(response(401, 'AUTH_REQUIRED'));
+  setupGlobalFetchInterceptor();
+  await window.fetch('/api/emails');
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(window.location.href).toContain('/login?callbackUrl=');
+});
+it('retries one multi-tab conflict using shared cookies', async () => {
+  fetchMock.mockResolvedValueOnce(response(409, 'REFRESH_CONFLICT')).mockResolvedValueOnce(response(200));
+  expect(await refreshTokenClient()).toBe(true);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+it('stops after a second conflict without forcing login', async () => {
+  fetchMock.mockResolvedValueOnce(response(401, 'AUTH_EXPIRED')).mockResolvedValue(response(409, 'REFRESH_CONFLICT'));
+  setupGlobalFetchInterceptor();
+  expect((await window.fetch('/api/emails')).status).toBe(401);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect(window.location.href).toBe('');
+});
+it.each([503, 500])('leaves transient refresh failure %s recoverable', async status => {
+  fetchMock.mockResolvedValueOnce(response(401, 'AUTH_EXPIRED')).mockResolvedValueOnce(response(status));
+  setupGlobalFetchInterceptor();
+  await window.fetch('/api/emails');
+  expect(window.location.href).toBe('');
+});
+it('redirects after definitive refresh rejection', async () => {
+  fetchMock.mockResolvedValueOnce(response(401, 'AUTH_EXPIRED')).mockResolvedValueOnce(response(401, 'AUTH_REQUIRED'));
+  setupGlobalFetchInterceptor();
+  await window.fetch('/api/emails');
+  expect(window.location.href).toContain('/login?callbackUrl=');
+});
+it('retains a Request body for its one retry', async () => {
+  const bodies: string[] = [];
+  fetchMock.mockImplementation(async input => {
+    if (input === '/api/auth/refresh') return response(200);
+    bodies.push(await input.text());
+    return bodies.length === 1 ? response(401, 'AUTH_EXPIRED') : response(200);
   });
-
-  afterEach(() => {
-    resetFetchInterceptor();
-    jest.resetAllMocks();
-  });
-
-  test('refreshTokenClient calls /api/auth/refresh and returns true when status is 200', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({ success: true }),
-    });
-
-    const result = await refreshTokenClient();
-    expect(result).toBe(true);
-  });
-
-  test('refreshTokenClient returns false when /api/auth/refresh returns 401', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-      json: async () => ({ error: 'Expired' }),
-    });
-
-    const result = await refreshTokenClient();
-    expect(result).toBe(false);
-  });
-
-  test('setupGlobalFetchInterceptor intercepts 401, refreshes token, and retries request', async () => {
-    let callCount = 0;
-    const fetchMock = jest.fn((input: any) => {
-      const url = typeof input === 'string' ? input : input?.url || String(input);
-      if (url.includes('/api/auth/refresh')) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) });
-      }
-      callCount++;
-      if (callCount === 1) {
-        return Promise.resolve({ ok: false, status: 401 });
-      }
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ data: 'success' }) });
-    });
-
-    window.fetch = fetchMock as any;
-    global.fetch = fetchMock as any;
-    setupGlobalFetchInterceptor();
-
-    const response = await window.fetch('/api/emails');
-    expect(response.status).toBe(200);
-  });
+  setupGlobalFetchInterceptor();
+  await window.fetch(new Request('http://localhost/api/emails', { method: 'POST', body: 'synthetic-body' }));
+  expect(bodies).toEqual(['synthetic-body', 'synthetic-body']);
 });

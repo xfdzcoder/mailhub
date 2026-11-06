@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { encrypt } from '@/lib/crypto';
-import { verifyToken } from '@/lib/auth/jwt';
+import { verifySessionToken as verifyToken } from '@/lib/auth/sessions';
 import { createOwnedAccount } from '@/lib/accounts/service';
 import { normalizeEmailAddress } from '@/lib/email/addresses';
 

@@ -1,19 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { jwtVerify } from 'jose';
-
-// Helper to get secret for Edge runtime
-function getSecret(): Uint8Array {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) throw new Error('JWT_SECRET environment variable is required');
-  return new TextEncoder().encode(secret);
-}
-
-function getRefreshSecret(): Uint8Array {
-  const secret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
-  if (!secret) throw new Error('JWT_SECRET environment variable is required');
-  return new TextEncoder().encode(`${secret}_refresh`);
-}
+import { verifyRefreshToken } from '@/lib/auth/jwt';
+import { verifySessionToken, authorizeSession } from '@/lib/auth/sessions';
 
 // Protected routes (dashboard)
 const protectedPaths = ['/inbox', '/labels', '/settings'];
@@ -38,7 +26,7 @@ export async function proxy(request: NextRequest) {
   let isValid = false;
   if (token) {
     try {
-      await jwtVerify(token, getSecret());
+      await verifySessionToken(token);
       isValid = true;
     } catch {
       isValid = false;
@@ -48,7 +36,9 @@ export async function proxy(request: NextRequest) {
   // If access token expired, check refresh token
   if (!isValid && refreshToken) {
     try {
-      await jwtVerify(refreshToken, getRefreshSecret());
+      // Page navigation may load the shell; APIs still require an access token
+      // and the client must rotate explicitly before retrying an expired request.
+      await authorizeSession(await verifyRefreshToken(refreshToken), refreshToken);
       isValid = true;
     } catch {
       isValid = false;

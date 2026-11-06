@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
+import { Prisma } from '@prisma/client';
 import {
   authenticate,
   requireAdmin,
@@ -61,16 +62,22 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
   }
 
   try {
-    await prisma.organizationMember.delete({
-      where: {
-        organizationId_userId: {
-          organizationId: auth.organizationId,
-          userId,
-        },
-      },
+    await prisma.$transaction(async tx => {
+      // Serialize with login/refresh so removal cannot miss a new session.
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId}::uuid FOR UPDATE`;
+      await tx.organizationMember.delete({
+        where: { organizationId_userId: { organizationId: auth.organizationId, userId } },
+      });
+      await tx.authSession.updateMany({
+        where: { organizationId: auth.organizationId, userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     });
     return apiResponse({ success: true });
-  } catch {
-    return apiError('Member not found', 404);
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+      return apiError('Member not found', 404);
+    }
+    return apiError('Failed to remove member', 500);
   }
 }

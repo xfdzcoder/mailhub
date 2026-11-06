@@ -1,97 +1,79 @@
-let isRefreshing = false;
+let refreshOperation: Promise<boolean> | undefined;
+let refreshRequiresLogin = false;
 let isIntercepted = false;
-let refreshSubscribers: ((success: boolean) => void)[] = [];
 
-function subscribeTokenRefresh(cb: (success: boolean) => void) {
-  refreshSubscribers.push(cb);
-}
-
-function onRefreshed(success: boolean) {
-  refreshSubscribers.forEach((cb) => cb(success));
-  refreshSubscribers = [];
-}
-
-export async function refreshTokenClient(): Promise<boolean> {
-  if (isRefreshing) {
-    return new Promise((resolve) => {
-      subscribeTokenRefresh((success) => resolve(success));
-    });
-  }
-
-  isRefreshing = true;
-
-  try {
-    const fetchFn = typeof window !== 'undefined' ? window.fetch : fetch;
-    const res = await fetchFn('/api/auth/refresh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    const success = res.ok;
-    onRefreshed(success);
-    return success;
-  } catch (err) {
-    onRefreshed(false);
+export function refreshTokenClient(): Promise<boolean> {
+  if (refreshOperation) return refreshOperation;
+  const refresh = async () => {
+    refreshRequiresLogin = false;
+    try {
+      const fetchFn = typeof window !== 'undefined' ? window.fetch : fetch;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await fetchFn('/api/auth/refresh', { method: 'POST', credentials: 'same-origin' });
+        if (res.ok) return true;
+        refreshRequiresLogin = res.status === 401;
+        if (res.status !== 409 || attempt !== 0) return false;
+        // A tab without Web Locks may have lost rotation. Give the winning
+        // response time to set its shared cookie, then retry exactly once.
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    } catch { /* Network/server failures leave the current page recoverable. */ }
     return false;
-  } finally {
-    isRefreshing = false;
-  }
+  };
+  // Web Locks serialize refresh across tabs on supported secure contexts.
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  const operation = (async () => locks ? await locks.request('mailhub-session-refresh', refresh) : await refresh())();
+  const pending = operation.finally(() => { refreshOperation = undefined; });
+  refreshOperation = pending;
+  return pending;
 }
+
+type InterceptedFetch = typeof fetch & { __originalFetch?: typeof fetch };
 
 export function setupGlobalFetchInterceptor() {
-  if (typeof window === 'undefined') return;
-  if (isIntercepted) return;
-
+  if (typeof window === 'undefined' || isIntercepted) return;
   const originalFetch = window.fetch;
   isIntercepted = true;
-
-  const interceptedFetch: typeof window.fetch = async (input, init) => {
-    const urlStr =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-        ? input.toString()
-        : input.url;
-
+  const interceptedFetch: InterceptedFetch = async (input, init) => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const apiPath = urlStr.startsWith('/') && !urlStr.startsWith('//') ? urlStr.split('?')[0]
+      : typeof window.location.origin === 'string' && new URL(urlStr, window.location.origin).origin === window.location.origin
+      ? new URL(urlStr, window.location.origin).pathname : '';
+    // Keep a replayable copy before fetch consumes a Request's body.
+    const retryInput = input instanceof Request ? input.clone() : input;
     const response = await originalFetch.call(window, input, init);
-
-    // Intercept 401 Unauthorized errors on app API routes (excluding auth endpoints)
-    if (
-      response.status === 401 &&
-      urlStr.startsWith('/api/') &&
-      !urlStr.includes('/api/auth/')
-    ) {
-      const refreshed = await refreshTokenClient();
-      if (refreshed) {
-        // Retry original request with fresh auth-token cookie
-        return originalFetch.call(window, input, init);
-      } else {
-        // Both access token (7d) and refresh token (30d) expired -> redirect to relogin
-        if (!window.location.pathname.startsWith('/login')) {
-          const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search);
-          window.location.href = `/login?callbackUrl=${callbackUrl}`;
+    if (response.status === 401 && apiPath.startsWith('/api/') && !['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/logout'].includes(apiPath)) {
+      const body = await response.clone().json().catch(() => ({}));
+      if (body.code === 'AUTH_REQUIRED') {
+        redirectToLogin();
+      } else if (body.code === 'AUTH_EXPIRED') {
+        if (await refreshTokenClient()) {
+          // One retry only, even if the replay also returns 401.
+          return originalFetch.call(window, retryInput, init);
         }
+        if (refreshRequiresLogin) redirectToLogin();
       }
     }
-
     return response;
   };
-
-  (interceptedFetch as any).__originalFetch = originalFetch;
+  interceptedFetch.__originalFetch = originalFetch;
   window.fetch = interceptedFetch;
-  if (typeof global !== 'undefined' && global.fetch) {
-    global.fetch = interceptedFetch;
+  if (typeof global !== 'undefined') global.fetch = interceptedFetch;
+}
+
+function redirectToLogin() {
+  if (!window.location.pathname.startsWith('/login')) {
+    const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search);
+    window.location.href = `/login?callbackUrl=${callbackUrl}`;
   }
 }
 
 export function resetFetchInterceptor() {
   if (typeof window === 'undefined') return;
-  if ((window.fetch as any)?.__originalFetch) {
-    const orig = (window.fetch as any).__originalFetch;
-    window.fetch = orig;
-    if (typeof global !== 'undefined') {
-      global.fetch = orig;
-    }
+  const original = (window.fetch as InterceptedFetch).__originalFetch;
+  if (original) {
+    window.fetch = original;
+    if (typeof global !== 'undefined') global.fetch = original;
   }
   isIntercepted = false;
 }

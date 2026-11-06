@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { hash } from 'bcryptjs';
 import { prisma } from '@/lib/db/prisma';
-import { createToken, createRefreshToken, ACCESS_TOKEN_MAX_AGE, REFRESH_TOKEN_MAX_AGE } from '@/lib/auth/jwt';
+import { createSession, SessionError } from '@/lib/auth/sessions';
+import { setSessionCookies } from '@/lib/auth/cookies';
 import { registerSchema } from '@/lib/validation';
 import { apiError, apiResponse } from '@/lib/auth/middleware';
 import { createOrganizationSlug } from '@/lib/identifiers';
@@ -57,10 +58,7 @@ export async function POST(req: NextRequest) {
       role: 'admin' as const,
     };
 
-    // 7 days Access Token
-    const token = await createToken(payload);
-    // 30 days Refresh Token
-    const refreshToken = await createRefreshToken(payload);
+    const pair = await createSession(payload, result.user.passwordHash);
 
     const response = apiResponse(
       {
@@ -70,26 +68,9 @@ export async function POST(req: NextRequest) {
       201
     );
 
-    // Access Token Cookie (7 Days)
-    response.cookies.set('auth-token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: ACCESS_TOKEN_MAX_AGE,
-      path: '/',
-    });
-
-    // Refresh Token Cookie (30 Days / 1 Month)
-    response.cookies.set('refresh-token', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: REFRESH_TOKEN_MAX_AGE,
-      path: '/',
-    });
-
-    return response;
+    return setSessionCookies(response, pair);
   } catch (error) {
+    if (error instanceof SessionError) return apiError('Please log in again', 401);
     console.error('Registration error:', error);
     return apiError('Internal server error', 500);
   }

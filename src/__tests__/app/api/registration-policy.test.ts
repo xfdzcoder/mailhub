@@ -1,10 +1,10 @@
 jest.mock('@/lib/db/prisma', () => ({ prisma: { user: { findUnique: jest.fn() }, $transaction: jest.fn() } }));
 jest.mock('bcryptjs', () => ({ hash: jest.fn().mockResolvedValue('synthetic-password-hash') }));
-jest.mock('@/lib/auth/jwt', () => ({
-  createToken: jest.fn().mockResolvedValue('synthetic-access'),
-  createRefreshToken: jest.fn().mockResolvedValue('synthetic-refresh'),
-  ACCESS_TOKEN_MAX_AGE: 60, REFRESH_TOKEN_MAX_AGE: 120,
+jest.mock('@/lib/auth/sessions', () => ({
+  createSession: jest.fn().mockResolvedValue({ token: 'synthetic-access', refreshToken: 'synthetic-refresh', expiresAt: new Date(), accessExpiresAt: new Date() }),
+  SessionError: class extends Error {},
 }));
+jest.mock('@/lib/auth/cookies', () => ({ setSessionCookies: (response: Response) => response }));
 jest.mock('@/lib/auth/middleware', () => ({
   apiError: (message: string, status: number) => Response.json({ error: message }, { status }),
   apiResponse: (data: unknown, status: number) => Object.assign(Response.json(data, { status }), { cookies: { set: jest.fn() } }),
@@ -15,7 +15,7 @@ import type { NextRequest } from 'next/server';
 import { POST } from '@/app/api/auth/register/route';
 import { prisma } from '@/lib/db/prisma';
 import { hash } from 'bcryptjs';
-import { createToken } from '@/lib/auth/jwt';
+import { createSession } from '@/lib/auth/sessions';
 const previousMode = process.env.REGISTRATION_MODE;
 const input = { email: 'fixture@example.test', name: 'Fixture', password: 'test-password-only', organizationName: 'Fixture Org' };
 function request(body: unknown = input) {
@@ -52,12 +52,12 @@ it('creates an organization and its administrator only when open', async () => {
   (prisma.user.findUnique as jest.Mock).mockResolvedValue(null);
   const membership = jest.fn();
   (prisma.$transaction as jest.Mock).mockImplementation(async callback => callback({
-    user: { create: jest.fn().mockResolvedValue({ id: 'user-1' }) },
+    user: { create: jest.fn().mockResolvedValue({ id: 'user-1', passwordHash: 'synthetic-password-hash' }) },
     organization: { create: jest.fn().mockResolvedValue({ id: 'org-1' }) },
     organizationMember: { create: membership },
   }));
   const response = await POST(request());
   expect(response.status).toBe(201);
   expect(membership).toHaveBeenCalledWith({ data: { organizationId: 'org-1', userId: 'user-1', role: 'admin' } });
-  expect(createToken).toHaveBeenCalledWith({ userId: 'user-1', organizationId: 'org-1', role: 'admin' });
+  expect(createSession).toHaveBeenCalledWith({ userId: 'user-1', organizationId: 'org-1', role: 'admin' }, 'synthetic-password-hash');
 });
