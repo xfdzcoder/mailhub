@@ -1,9 +1,11 @@
+jest.mock('@/lib/network/origin-policy', () => ({ ...jest.requireActual('@/lib/network/origin-policy'), modelPostJson: jest.fn() }));
+import { modelPostJson } from '@/lib/network/origin-policy';
 jest.mock('@/lib/db/prisma', () => ({ prisma: { systemPreference: { upsert: jest.fn().mockResolvedValue({ isAiEnabled: true }) }, experimentSetting: { findUnique: jest.fn().mockResolvedValue(null) } } }));
 import { generateEmailBatchSummary } from '../../../lib/ai/summary-service';
 
 describe('AI LLM Email Summarization Service', () => {
   beforeEach(() => {
-    global.fetch = jest.fn();
+    (modelPostJson as jest.Mock).mockReset();
   });
 
   afterEach(() => {
@@ -19,14 +21,11 @@ describe('AI LLM Email Summarization Service', () => {
     });
 
     expect(summary).toContain('No emails found under label **Invoices** to summarize.');
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(modelPostJson).not.toHaveBeenCalled();
   });
 
   test('calls OpenAI endpoint and returns generated summary text', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({
+    (modelPostJson as jest.Mock).mockResolvedValueOnce({
         choices: [
           {
             message: {
@@ -34,7 +33,6 @@ describe('AI LLM Email Summarization Service', () => {
             },
           },
         ],
-      }),
     });
 
     const summary = await generateEmailBatchSummary({
@@ -56,24 +54,16 @@ describe('AI LLM Email Summarization Service', () => {
     });
 
     expect(summary).toBe('- Invoice #1024 paid\n- Renewal due next week');
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(modelPostJson).toHaveBeenCalledWith(
       'https://api.openai.com/v1/chat/completions',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          Authorization: 'Bearer sk-test-key',
-        }),
-      })
+      expect.objectContaining({ Authorization: 'Bearer sk-test-key' }),
+      expect.any(String)
     );
   });
 
   test('calls Claude endpoint with x-api-key header', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({
+    (modelPostJson as jest.Mock).mockResolvedValueOnce({
         content: [{ type: 'text', text: 'Claude summary of emails' }],
-      }),
     });
 
     const summary = await generateEmailBatchSummary({
@@ -92,24 +82,16 @@ describe('AI LLM Email Summarization Service', () => {
     });
 
     expect(summary).toBe('Claude summary of emails');
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(modelPostJson).toHaveBeenCalledWith(
       'https://api.anthropic.com/v1/messages',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'x-api-key': 'claude-key',
-        }),
-      })
+      expect.objectContaining({ 'x-api-key': 'claude-key' }),
+      expect.any(String)
     );
   });
 
   test('includes cleaned bodyText in single pass prompt when bodyText is provided', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({
+    (modelPostJson as jest.Mock).mockResolvedValueOnce({
         choices: [{ message: { content: 'Summary of body text email' } }],
-      }),
     });
 
     const summary = await generateEmailBatchSummary({
@@ -127,28 +109,22 @@ describe('AI LLM Email Summarization Service', () => {
     });
 
     expect(summary).toBe('Summary of body text email');
-    const fetchBody = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
+    const fetchBody = JSON.parse((modelPostJson as jest.Mock).mock.calls[0][2]);
     const userMessageContent = fetchBody.messages.find((m: { role: string }) => m.role === 'user').content;
     expect(userMessageContent).toContain('This is full body content.');
     expect(userMessageContent).not.toContain('<script>');
   });
 
   test('triggers Map-Reduce chunked summarization for email batches exceeding threshold', async () => {
-    (global.fetch as jest.Mock)
+    (modelPostJson as jest.Mock)
       .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ choices: [{ message: { content: '- Chunk 1 summary' } }] }),
+        choices: [{ message: { content: '- Chunk 1 summary' } }],
       })
       .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ choices: [{ message: { content: '- Chunk 2 summary' } }] }),
+        choices: [{ message: { content: '- Chunk 2 summary' } }],
       })
       .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ choices: [{ message: { content: 'Final reduced executive summary' } }] }),
+        choices: [{ message: { content: 'Final reduced executive summary' } }],
       });
 
     const dummyEmails = Array.from({ length: 25 }, (_, i) => ({
@@ -168,7 +144,7 @@ describe('AI LLM Email Summarization Service', () => {
     });
 
     expect(summary).toBe('Final reduced executive summary');
-    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(modelPostJson).toHaveBeenCalledTimes(3);
   });
 });
 

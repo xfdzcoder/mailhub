@@ -1,11 +1,12 @@
+import { modelPostJson, modelUrl, OriginPolicyError } from '@/lib/network/origin-policy';
 import { prisma } from '@/lib/db/prisma';
 import { getSystemPreferences } from '@/lib/settings/system-preferences';
 
 export type AiUnavailableReason = 'disabled' | 'provider_unavailable';
 
 export class AiUnavailableError extends Error {
-  constructor(public readonly reason: AiUnavailableReason) {
-    super(reason === 'disabled' ? 'AI is disabled for this organization or member' : 'AI provider is unavailable');
+  constructor(public readonly reason: AiUnavailableReason, guidance?: string) {
+    super(guidance || (reason === 'disabled' ? 'AI is disabled for this organization or member' : 'AI provider is unavailable'));
     this.name = 'AiUnavailableError';
   }
 }
@@ -29,8 +30,6 @@ export interface LlmCallArgs {
   responseFormatJson?: boolean;
 }
 
-const PROVIDER_TIMEOUT_MS = 20_000;
-
 export async function getResolvedAiConfig(organizationId: string, userId?: string) {
   const [systemPreferences, setting, member] = await Promise.all([
     getSystemPreferences(),
@@ -52,7 +51,8 @@ export async function getResolvedAiConfig(organizationId: string, userId?: strin
   if (setting) {
     return {
       provider: setting.aiProvider || 'openai',
-      apiKey: setting.aiApiKey || process.env.AI_API_KEY || process.env.OPENAI_API_KEY || null,
+      apiKey: setting.aiApiKey || null,
+      tenantEndpoint: !!setting.aiBaseUrl,
       baseUrl: setting.aiBaseUrl || (setting.aiProvider === 'ollama' || setting.aiProvider === 'local_llm' ? 'http://localhost:11434/v1' : null),
       modelName: setting.aiModelName || 'gpt-4o-mini',
     };
@@ -61,7 +61,8 @@ export async function getResolvedAiConfig(organizationId: string, userId?: strin
   const provider = process.env.AI_PROVIDER || 'openai';
   return {
     provider,
-    apiKey: process.env.AI_API_KEY || process.env.OPENAI_API_KEY || null,
+    tenantEndpoint: false,
+    apiKey: null as string | null,
     baseUrl: process.env.AI_BASE_URL || (provider === 'ollama' || provider === 'local_llm' ? 'http://localhost:11434/v1' : null),
     modelName: process.env.AI_MODEL_NAME || 'gpt-4o-mini',
   };
@@ -70,7 +71,9 @@ export async function getResolvedAiConfig(organizationId: string, userId?: strin
 export async function callLlmApi(args: LlmCallArgs): Promise<string> {
   const resolved = await getResolvedAiConfig(args.organizationId, args.userId);
   const provider = args.provider || resolved.provider;
-  const apiKey = args.apiKey || resolved.apiKey;
+  const tenantEndpoint = !!args.baseUrl || resolved.tenantEndpoint;
+  let apiKey = args.apiKey !== undefined ? args.apiKey : resolved.apiKey;
+  const sharedKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || null;
   const baseUrl = args.baseUrl !== undefined ? args.baseUrl : resolved.baseUrl;
   const modelName = args.modelName || resolved.modelName;
   const { systemInstruction, userPrompt, responseFormatJson } = args;
@@ -85,7 +88,6 @@ export async function callLlmApi(args: LlmCallArgs): Promise<string> {
       'Content-Type': 'application/json',
       'anthropic-version': '2023-06-01',
     };
-    if (apiKey) headers['x-api-key'] = apiKey;
     payload = {
       model: modelName || 'claude-3-5-sonnet-20241022',
       max_tokens: 1500,
@@ -98,7 +100,6 @@ export async function callLlmApi(args: LlmCallArgs): Promise<string> {
       : 'https://api.openai.com/v1';
     endpoint = `${(baseUrl || defaultBaseUrl).replace(/\/$/, '')}/chat/completions`;
     headers = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
     payload = {
       model: modelName || 'gpt-4o-mini',
       messages: [
@@ -113,15 +114,16 @@ export async function callLlmApi(args: LlmCallArgs): Promise<string> {
   }
 
   try {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new AiUnavailableError('provider_unavailable');
-
-    const data = await res.json();
+    const origin = modelUrl(endpoint).origin;
+    const sharedOrigin = modelUrl(process.env.AI_SHARED_CREDENTIAL_ORIGIN ||
+      (process.env.AI_PROVIDER === 'claude' ? 'https://api.anthropic.com' : 'https://api.openai.com')).origin;
+    // Shared credentials are never inherited by tenant-selected endpoints.
+    if (!apiKey && !tenantEndpoint && origin === sharedOrigin) apiKey = sharedKey;
+    if (apiKey) headers[provider === 'claude' ? 'x-api-key' : 'Authorization'] = provider === 'claude' ? apiKey : `Bearer ${apiKey}`;
+    const data = await modelPostJson(endpoint, headers, JSON.stringify(payload)) as {
+      content?: Array<{ type: string; text?: string }>;
+      choices?: Array<{ message?: { content?: string } }>;
+    };
     const content = provider === 'claude'
       ? data.content?.find((item: { type: string; text?: string }) => item.type === 'text')?.text
       : data.choices?.[0]?.message?.content;
@@ -131,6 +133,6 @@ export async function callLlmApi(args: LlmCallArgs): Promise<string> {
     return content;
   } catch (error) {
     if (error instanceof AiUnavailableError) throw error;
-    throw new AiUnavailableError('provider_unavailable');
+    throw new AiUnavailableError('provider_unavailable', error instanceof OriginPolicyError ? error.message : undefined);
   }
 }
