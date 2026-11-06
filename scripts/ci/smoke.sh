@@ -11,10 +11,54 @@ cleanup() {
   exit "$result"
 }
 trap cleanup EXIT
+# Inspect installed packages in the actual images, including the worker runtime.
+for target in runtime migrate; do
+  image=${RUNTIME_IMAGE:-mailhub-smoke:runtime}
+  if [[ $target == migrate ]]; then image=${MIGRATION_IMAGE:-mailhub-smoke:migrate}; fi
+  docker run --rm -e INVENTORY_TARGET="$target" --entrypoint node "$image" -e '
+    const fs = require("node:fs");
+    const generatedVersion = require("@prisma/client").Prisma.prismaVersion.client;
+    console.log(process.env.INVENTORY_TARGET, "generated client", generatedVersion);
+    if (generatedVersion !== "7.10.1") process.exitCode = 1;
+    const names = ["@prisma/client", "@prisma/adapter-pg", "@prisma/driver-adapter-utils", "pg", "prisma", "@prisma/config", "@prisma/dev", "@prisma/engines", "@prisma/studio-core"];
+    for (const name of names) {
+      const path = "node_modules/" + name + "/package.json";
+      const version = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path)).version : null;
+      console.log(process.env.INVENTORY_TARGET, name, version ?? "absent");
+      if (name === "pg" && version === null) process.exitCode = 1;
+      if (["@prisma/client", "@prisma/adapter-pg", "@prisma/driver-adapter-utils"].includes(name) && version !== "7.10.1") process.exitCode = 1;
+      if (["prisma", "@prisma/config", "@prisma/dev", "@prisma/engines", "@prisma/studio-core"].includes(name) && (process.env.INVENTORY_TARGET === "runtime" ? version !== null : version === null)) process.exitCode = 1;
+    }
+  '
+done
 "${compose[@]}" up -d --wait postgres redis meilisearch
 "${compose[@]}" run --rm migrate
 # A second deployment must be a no-op, proving the migration command is repeatable.
 "${compose[@]}" run --rm migrate
+# Upgrade an existing initial schema in a separate disposable database. Resolve
+# only the migration whose SQL was actually applied, then deploy the remainder.
+"${compose[@]}" exec -T postgres createdb -U mailhub mailhub_upgrade
+"${compose[@]}" exec -T postgres psql -U mailhub -d mailhub_upgrade -v ON_ERROR_STOP=1 \
+  < prisma/migrations/20260622005505_init/migration.sql
+"${compose[@]}" exec -T postgres psql -U mailhub -d mailhub_upgrade -v ON_ERROR_STOP=1 -c \
+  "INSERT INTO users (id,email,name,password_hash,updated_at) VALUES ('00000000-0000-4000-8000-000000000017','fixture@example.invalid','Upgrade fixture','fixture-hash',CURRENT_TIMESTAMP);"
+upgrade_url=postgresql://mailhub:ci-only-password@postgres:5432/mailhub_upgrade
+"${compose[@]}" run --rm -e DATABASE_URL="$upgrade_url" migrate \
+  npx --no-install prisma migrate resolve --applied 20260622005505_init
+"${compose[@]}" run --rm -e DATABASE_URL="$upgrade_url" migrate
+"${compose[@]}" run --rm -e DATABASE_URL="$upgrade_url" migrate
+"${compose[@]}" exec -T postgres psql -U mailhub -d mailhub_upgrade -v ON_ERROR_STOP=1 <<'SQL'
+DO $$ BEGIN
+  IF (SELECT count(*) FROM users) <> 1 OR NOT EXISTS (
+    SELECT 1 FROM users WHERE id = '00000000-0000-4000-8000-000000000017'
+      AND email = 'fixture@example.invalid' AND name = 'Upgrade fixture'
+      AND password_hash = 'fixture-hash'
+  ) THEN RAISE EXCEPTION 'Existing user data changed during upgrade'; END IF;
+  IF to_regclass('auth_sessions') IS NULL THEN
+    RAISE EXCEPTION 'Upgrade did not reach the current schema';
+  END IF;
+END $$;
+SQL
 # Startup smoke does not require an embedding server. Disable AI in this disposable DB.
 "${compose[@]}" exec -T postgres psql -U mailhub -d mailhub -v ON_ERROR_STOP=1 -c \
   "INSERT INTO system_preferences (id,is_ai_enabled,semantic_search_enabled) VALUES ('global',false,false) ON CONFLICT (id) DO UPDATE SET is_ai_enabled=false,semantic_search_enabled=false;"
