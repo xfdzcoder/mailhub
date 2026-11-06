@@ -38,7 +38,9 @@ is a separate manual operation after a backup; build the migration target from
 the same source commit as the runtime.
 
 Smoke tests create a unique temporary Compose project with PostgreSQL, Redis,
-and Meilisearch. They run migrations twice, disable AI/embeddings in that test
+and Meilisearch. They inspect the runtime and migration package inventories, run clean-database
+migrations twice, and upgrade an initial-schema fixture twice while checking that
+its seeded user survives unchanged. They then disable AI/embeddings in the clean test
 DB, and verify the final runtime's Web endpoint and Worker heartbeat. The project
 and its volumes are removed on exit. No real mail accounts or deployment secrets
 are required. Missing upstream migrations for signatures, experiment settings,
