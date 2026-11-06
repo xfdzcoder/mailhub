@@ -280,9 +280,6 @@
   "src/app/api/notifications/test/route.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 3
-    },
-    "@typescript-eslint/no-require-imports": {
-      "count": 1
     }
   },
   "src/app/api/realtime/stream/route.ts": {
@@ -522,11 +519,6 @@
   "src/lib/imap/connection-manager.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 8
-    }
-  },
-  "src/lib/notifications/account-push.ts": {
-    "@typescript-eslint/no-require-imports": {
-      "count": 1
     }
   },
   "src/lib/queue/client.ts": {

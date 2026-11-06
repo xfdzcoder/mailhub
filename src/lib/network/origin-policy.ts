@@ -4,11 +4,12 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest, type RequestOptions } from 'node:https';
 import { cidrContains, isPublicIpAddress, parseCidr, type OutboundHostLookup } from './outbound-host';
 
-export type OutboundPurpose = 'model' | 'notification';
+export type OutboundPurpose = 'model' | 'notification' | 'push';
 
 const policyEnvironment: Record<OutboundPurpose, string> = {
   model: 'MODEL_ORIGIN_POLICY',
   notification: 'NOTIFICATION_ORIGIN_POLICY',
+  push: 'PUSH_ORIGIN_POLICY',
 };
 
 export class OriginPolicyError extends Error {
@@ -19,11 +20,11 @@ export class OriginPolicyError extends Error {
 }
 
 /** Reject parser repairs and URL components that are ambiguous for endpoint joining. */
-export function modelUrl(value: string): URL {
+export function modelUrl(value: string, allowSearch = false): URL {
   if (!/^https?:\/\/[^/]/i.test(value) || /[\s\\]/.test(value)) throw new OriginPolicyError();
   let url: URL;
   try { url = new URL(value); } catch { throw new OriginPolicyError(); }
-  if (url.username || url.password || url.hash || url.search || url.hostname.endsWith('.')) throw new OriginPolicyError();
+  if (url.username || url.password || url.hash || (!allowSearch && url.search) || url.hostname.endsWith('.')) throw new OriginPolicyError();
   const authority = value.split('/')[2];
   if (authority.includes('@') || authority.includes('%') || authority.endsWith(':')) throw new OriginPolicyError();
   // Reject alternate IPv4 spellings (integer, octal, hex, shortened forms).
@@ -36,7 +37,11 @@ type Rule = { origin: string; addresses?: string[] };
 
 /** Purpose-specific deployment configuration; never read notification or tenant settings. */
 function originRules(purpose: OutboundPurpose): Rule[] {
-  const defaults: Rule[] = purpose === 'model' ? [{ origin: 'https://api.openai.com' }, { origin: 'https://api.anthropic.com' }] : [];
+  const defaults: Rule[] = purpose === 'model' ? [{ origin: 'https://api.openai.com' }, { origin: 'https://api.anthropic.com' }] : purpose === 'push' ? [
+    { origin: 'https://fcm.googleapis.com' },
+    { origin: 'https://updates.push.services.mozilla.com' },
+    { origin: 'https://web.push.apple.com' },
+  ] : [];
   const configured = process.env[policyEnvironment[purpose]];
   if (!configured) return defaults;
   try {
@@ -58,6 +63,7 @@ export async function resolveModelTarget(url: URL, dns: OutboundHostLookup = loo
 }
 
 export async function resolveOriginTarget(purpose: OutboundPurpose, url: URL, dns: OutboundHostLookup = lookup as OutboundHostLookup) {
+  if (purpose === 'push' && url.protocol !== 'https:') throw new OriginPolicyError(purpose);
   const rule = originRules(purpose).find(rule => rule.origin === url.origin);
   if (!rule) throw new OriginPolicyError(purpose);
   const host = url.hostname.replace(/^\[|\]$/g, '');
@@ -80,7 +86,15 @@ export async function modelPostJson(endpoint: string, headers: Record<string, st
 export async function postJsonWithPolicy(purpose: OutboundPurpose, endpoint: string, headers: Record<string, string>, body: string,
   limits = { connectMs: 5_000, totalMs: 20_000, responseBytes: 2 * 1024 * 1024 },
 ): Promise<unknown> {
-  const url = modelUrl(endpoint);
+  const result = await postWithPolicy(purpose, endpoint, headers, body, limits);
+  if (result.status < 200 || result.status >= 300) throw new Error('Provider returned an unsuccessful status');
+  return JSON.parse(result.body);
+}
+
+export async function postWithPolicy(purpose: OutboundPurpose, endpoint: string, headers: Record<string, string>, body: string | Buffer,
+  limits = { connectMs: 5_000, totalMs: 20_000, responseBytes: 2 * 1024 * 1024 },
+): Promise<{ status: number; body: string }> {
+  const url = modelUrl(endpoint, purpose === 'push');
   // The total deadline includes DNS resolution and body consumption.
   const signal = AbortSignal.timeout(limits.totalMs);
   const target = await new Promise<Awaited<ReturnType<typeof resolveModelTarget>>>((resolve, reject) => {
@@ -96,7 +110,7 @@ export async function postJsonWithPolicy(purpose: OutboundPurpose, endpoint: str
       lookup: (_hostname, _options, callback) => callback(null, target.address, target.family),
     };
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, requestOptions, response => {
-      if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+      if (!response.statusCode || (response.statusCode >= 300 && response.statusCode < 400)) {
         response.destroy();
         reject(new Error('Model provider returned an unsuccessful status'));
         return;
@@ -111,7 +125,7 @@ export async function postJsonWithPolicy(purpose: OutboundPurpose, endpoint: str
       });
       response.on('error', reject);
       response.on('end', () => {
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (error) { reject(error); }
+        resolve({ status: response.statusCode!, body: Buffer.concat(chunks).toString('utf8') });
       });
     });
     const timer = setTimeout(() => request.destroy(new Error('Model connection deadline exceeded')), limits.connectMs);
