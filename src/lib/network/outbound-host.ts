@@ -122,7 +122,7 @@ const IPV6_BLOCKS: Array<[bigint, number]> = [
   [ipv6Base('ff00::'), 8],
 ];
 
-function isPublicIpAddress(address: string): boolean {
+export function isPublicIpAddress(address: string): boolean {
   const family = isIP(address);
   if (family === 4) {
     const parsed = ipv4ToNumber(address);
@@ -188,7 +188,7 @@ function parseIpv6Cidr(value: string): Ipv6Cidr | null {
   return { family: 6, base: (parsed >> shift) << shift, prefix };
 }
 
-function parseCidr(value: string): IpCidr | null {
+export function parseCidr(value: string): IpCidr | null {
   const address = value.trim().split('/')[0].trim();
   const family = isIP(address);
   if (family === 4) return parseIpv4Cidr(value);
@@ -210,7 +210,7 @@ function isReservedCidr(cidr: IpCidr): boolean {
   );
 }
 
-function cidrContains(cidr: IpCidr, address: string): boolean {
+export function cidrContains(cidr: IpCidr, address: string): boolean {
   if (cidr.family === 4) {
     const parsed = ipv4ToNumber(address);
     if (parsed === null) return false;

@@ -442,3 +442,6 @@ For security disclosures, supported versions, and vulnerability reporting proced
 This project is licensed under the [MIT License](LICENSE) - see the [LICENSE](LICENSE) file for details.
 
 
+
+Model endpoint operators: see [model outbound origin policy](docs/security/model-origin-policy.md)
+for approval configuration, local-service compatibility, credential isolation and rollout checks.

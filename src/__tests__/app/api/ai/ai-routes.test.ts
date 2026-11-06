@@ -24,8 +24,11 @@ import { POST as toolboxPost } from '@/app/api/ai/toolbox/route';
 import { authenticate } from '@/lib/auth/middleware';
 import { prisma } from '@/lib/db/prisma';
 
-// Mock fetch globally for LLM API calls
-global.fetch = jest.fn();
+jest.mock('@/lib/network/origin-policy', () => ({
+  ...jest.requireActual('@/lib/network/origin-policy'),
+  modelPostJson: jest.fn(),
+}));
+import { modelPostJson } from '@/lib/network/origin-policy';
 
 const mockAuthenticate = authenticate as jest.Mock;
 const mockFindAccount = prisma.emailAccount.findFirst as jest.Mock;
@@ -61,11 +64,8 @@ describe('AI API Routes', () => {
     });
 
     it('successfully generates draft when given prompt', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
+      (modelPostJson as jest.Mock).mockResolvedValueOnce({
           choices: [{ message: { content: 'Subject: Hello\n\nDear John, thanks!' } }],
-        }),
       });
 
       const req = new Request('http://localhost/api/ai/draft', {
@@ -96,11 +96,8 @@ describe('AI API Routes', () => {
         </div>
       `;
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
+      (modelPostJson as jest.Mock).mockResolvedValueOnce({
           choices: [{ message: { content: 'Subject: Re: Proposal\n\nHi Bob, will review.' } }],
-        }),
       });
 
       const req = new Request('http://localhost/api/ai/draft', {
@@ -119,8 +116,8 @@ describe('AI API Routes', () => {
       expect(res.status).toBe(200);
 
       // Verify the payload sent to LLM was sanitized
-      const fetchCall = (global.fetch as jest.Mock).mock.calls[0];
-      const reqBody = JSON.parse(fetchCall[1].body);
+      const fetchCall = (modelPostJson as jest.Mock).mock.calls[0];
+      const reqBody = JSON.parse(fetchCall[2]);
       const userMessage = reqBody.messages.find((m: any) => m.role === 'user').content;
 
       expect(userMessage).toContain('Please review the proposal by tomorrow.');
@@ -151,11 +148,8 @@ describe('AI API Routes', () => {
         jargon: [],
       };
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
+      (modelPostJson as jest.Mock).mockResolvedValueOnce({
           choices: [{ message: { content: JSON.stringify(mockExplanation) } }],
-        }),
       });
 
       const req = new Request('http://localhost/api/ai/explain', {
@@ -173,8 +167,8 @@ describe('AI API Routes', () => {
       expect(json.explanation.summary).toBe('This is a meeting confirmation.');
       expect(json.explanation.takeaways).toContain('Meeting at 2pm');
 
-      const fetchCall = (global.fetch as jest.Mock).mock.calls[0];
-      const reqBody = JSON.parse(fetchCall[1].body);
+      const fetchCall = (modelPostJson as jest.Mock).mock.calls[0];
+      const reqBody = JSON.parse(fetchCall[2]);
       const userMessage = reqBody.messages.find((m: any) => m.role === 'user').content;
       expect(userMessage).not.toContain('<style>');
       expect(userMessage).toContain('Let us meet at 2pm.');
@@ -192,11 +186,8 @@ describe('AI API Routes', () => {
     });
 
     it('executes requested toolbox tool successfully with sanitized input', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
+      (modelPostJson as jest.Mock).mockResolvedValueOnce({
           choices: [{ message: { content: '- Send report by Friday' } }],
-        }),
       });
 
       const req = new Request('http://localhost/api/ai/toolbox', {
@@ -214,8 +205,8 @@ describe('AI API Routes', () => {
       expect(json.tool).toBe('extract_tasks');
       expect(json.result).toContain('Send report by Friday');
 
-      const fetchCall = (global.fetch as jest.Mock).mock.calls[0];
-      const reqBody = JSON.parse(fetchCall[1].body);
+      const fetchCall = (modelPostJson as jest.Mock).mock.calls[0];
+      const reqBody = JSON.parse(fetchCall[2]);
       const userMessage = reqBody.messages.find((m: any) => m.role === 'user').content;
       expect(userMessage).not.toContain('<p>');
       expect(userMessage).not.toContain('data:image');
