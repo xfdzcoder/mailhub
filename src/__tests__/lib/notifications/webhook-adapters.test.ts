@@ -1,3 +1,5 @@
+jest.mock('../../../lib/network/origin-policy', () => ({ ...jest.requireActual('../../../lib/network/origin-policy'), notificationPost: jest.fn() }));
+import { notificationPost } from '../../../lib/network/origin-policy';
 import {
   sendTelegramNotification,
   sendWeComNotification,
@@ -7,7 +9,7 @@ import {
 
 describe('Webhook Notification Adapters', () => {
   beforeEach(() => {
-    global.fetch = jest.fn();
+    (notificationPost as jest.Mock).mockReset();
   });
 
   afterEach(() => {
@@ -15,9 +17,9 @@ describe('Webhook Notification Adapters', () => {
   });
 
   test('sendTelegramNotification formats payload and dispatches successfully', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
+    (notificationPost as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      status: 200,
+      statusCode: 200,
       json: async () => ({ ok: true }),
     });
 
@@ -29,19 +31,19 @@ describe('Webhook Notification Adapters', () => {
 
     expect(result.success).toBe(true);
     expect(result.type).toBe('TELEGRAM');
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(notificationPost).toHaveBeenCalledWith(
       'https://api.telegram.org/bottest-token/sendMessage',
       expect.objectContaining({
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      })
+        'Content-Type': 'application/json',
+      }),
+      expect.any(String)
     );
   });
 
   test('sendWeComNotification formats markdown payload and dispatches successfully', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
+    (notificationPost as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      status: 200,
+      statusCode: 200,
     });
 
     const result = await sendWeComNotification(
@@ -52,19 +54,17 @@ describe('Webhook Notification Adapters', () => {
 
     expect(result.success).toBe(true);
     expect(result.type).toBe('WECOM');
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(notificationPost).toHaveBeenCalledWith(
       'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=123',
-      expect.objectContaining({
-        method: 'POST',
-        body: expect.stringContaining('### 📧 MailHub AI Summary: Support'),
-      })
+      { 'Content-Type': 'application/json' },
+      expect.stringContaining('### 📧 MailHub AI Summary: Support')
     );
   });
 
   test('sendGenericWebhookNotification posts standard JSON payload', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
+    (notificationPost as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      status: 200,
+      statusCode: 200,
     });
 
     const result = await sendGenericWebhookNotification(
@@ -76,22 +76,20 @@ describe('Webhook Notification Adapters', () => {
 
     expect(result.success).toBe(true);
     expect(result.type).toBe('GENERIC');
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(notificationPost).toHaveBeenCalledWith(
       'https://example.com/webhook',
       expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'Content-Type': 'application/json',
-          'X-Webhook-Secret': 'my-secret',
-        }),
-      })
+        'Content-Type': 'application/json',
+        'X-Webhook-Secret': 'my-secret',
+      }),
+      expect.any(String)
     );
   });
 
   test('dispatchWebhookNotification dispatches via generic interface', async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
+    (notificationPost as jest.Mock).mockResolvedValueOnce({
       ok: true,
-      status: 200,
+      statusCode: 200,
     });
 
     const result = await dispatchWebhookNotification({
@@ -104,4 +102,17 @@ describe('Webhook Notification Adapters', () => {
 
     expect(result.success).toBe(true);
   });
+});
+
+it('redacts and bounds raw transport diagnostics', async () => {
+  (notificationPost as jest.Mock).mockRejectedValueOnce(new Error('https://example.invalid/botsecret?key=secret ' + 'x'.repeat(10000)));
+  const result = await sendTelegramNotification({ botToken: 'synthetic', chatId: 'synthetic' }, 'Synthetic', 'Summary');
+  expect(result).toMatchObject({ success: false, error: 'Notification delivery failed' });
+});
+
+it('encodes Telegram path credentials instead of allowing route injection', async () => {
+  (notificationPost as jest.Mock).mockResolvedValueOnce({ statusCode: 200 });
+  await sendTelegramNotification({ botToken: 'synthetic/token?key=secret', chatId: 'synthetic' }, 'Synthetic', 'Summary');
+  expect(notificationPost).toHaveBeenLastCalledWith(
+    'https://api.telegram.org/botsynthetic%2Ftoken%3Fkey%3Dsecret/sendMessage', expect.any(Object), expect.any(String));
 });
