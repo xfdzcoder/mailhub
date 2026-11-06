@@ -192,16 +192,6 @@
       "count": 1
     }
   },
-  "src/app/api/accounts/oauth/google/callback/route.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
-  "src/app/api/accounts/oauth/microsoft/callback/route.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
   "src/app/api/accounts/test-credentials/route.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
