@@ -1,3 +1,4 @@
+import { notificationPost, OutboundStatusError, OriginPolicyError } from '../network/origin-policy';
 import { WeComConfig, WebhookDispatchResult } from './types';
 
 export async function sendWeComNotification(
@@ -19,41 +20,28 @@ export async function sendWeComNotification(
   const markdownContent = `### 📧 MailHub AI Summary: ${labelName}\n\n${summaryText}`;
 
   try {
-    const res = await fetch(config.webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const res = await notificationPost(config.webhookUrl, { 'Content-Type': 'application/json' }, JSON.stringify({
+      msgtype: 'markdown',
+      markdown: {
+        content: markdownContent,
       },
-      body: JSON.stringify({
-        msgtype: 'markdown',
-        markdown: {
-          content: markdownContent,
-        },
-      }),
-    });
-
-    if (!res.ok) {
-      const errorText = await res.text();
-      return {
-        success: false,
-        type: 'WECOM',
-        statusCode: res.status,
-        error: `WeCom Webhook error (${res.status}): ${errorText}`,
-        deliveredAt,
-      };
-    }
+    }));
 
     return {
       success: true,
       type: 'WECOM',
-      statusCode: res.status,
+      statusCode: res.statusCode,
       deliveredAt,
     };
   } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
+    // Never persist remote bodies, URLs, path/query tokens or raw socket errors.
+    const errorMsg = err instanceof OriginPolicyError
+      ? 'Notification destination is not approved; ask the operator to configure NOTIFICATION_ORIGIN_POLICY'
+      : 'Notification delivery failed';
     return {
       success: false,
       type: 'WECOM',
+      statusCode: err instanceof OutboundStatusError ? err.statusCode : undefined,
       error: errorMsg,
       deliveredAt,
     };
