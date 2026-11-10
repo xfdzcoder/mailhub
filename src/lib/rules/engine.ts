@@ -1,3 +1,6 @@
+import { withWork } from '@/lib/workload/admission';
+import { accountWorkOwner } from '@/lib/workload/ownership';
+import { claimSend } from '@/lib/workload/send-once';
 import { getRuleRegexError, testRuleRegex } from './regex';
 import {
   EmailEvaluationInput,
@@ -426,13 +429,18 @@ export async function processRulesForNewEmail(
               )
             : [];
 
-        await sendEmail(accountId, {
+        const forwardInput = {
           to: combinedActions.forwardTo,
           subject: fwdSubject,
           bodyHtml: quoteHtml,
           bodyText: `---------- Forwarded message ---------\nFrom: ${fromDisplay}\nSubject: ${email.subject || ''}\n\n${email.body?.bodyText || ''}`,
           ...(forwardedAttachments.length > 0 ? { attachments: forwardedAttachments } : {}),
-        });
+        };
+        const owner = await accountWorkOwner(accountId);
+        await withWork(owner, async () => {
+          if (!await claimSend(owner, accountId, forwardInput)) return;
+          await sendEmail(accountId, forwardInput);
+        }, Buffer.byteLength(JSON.stringify(forwardInput)));
 
         console.log(`[EmailRule] Forwarded email ${emailId} to ${combinedActions.forwardTo.join(', ')}`);
       } catch (fwdErr) {

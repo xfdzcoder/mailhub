@@ -244,7 +244,7 @@
   },
   "src/app/api/experiments/summary/trigger/route.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 2
+      "count": 1
     }
   },
   "src/app/api/experiments/webhooks/[id]/route.ts": {

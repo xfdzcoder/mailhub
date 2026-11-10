@@ -1,3 +1,11 @@
+// These fixtures exercise mailbox behavior; admission has isolated Redis integration coverage.
+jest.mock('@/lib/workload/admission', () => ({
+  withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(),
+  AdmissionError: class extends Error {},
+}));
+jest.mock('@/lib/workload/ownership', () => ({
+  accountWorkOwner: async () => ({ userId: 'fixture-user', organizationId: 'fixture-org' }),
+}));
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
     emailAccount: {

@@ -1,3 +1,4 @@
+import { AdmissionError } from '@/lib/workload/admission';
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { authenticate, apiResponse, apiError } from '@/lib/auth/middleware';
@@ -22,7 +23,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   try {
     const emails = await prisma.email.findMany({
-      where: { accountId: id },
+      where: { accountId: id, ...(req.nextUrl.searchParams.get('after') ? { id: { gt: req.nextUrl.searchParams.get('after')! } } : {}) },
+      orderBy: { id: 'asc' },
+      take: 32,
       select: { id: true }
     });
 
@@ -38,10 +41,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     return apiResponse({
       success: true,
+      nextCursor: emails.length === 32 ? emails[emails.length - 1].id : null,
       message: `Successfully queued ${emails.length} emails for search reindexing.`
     });
   } catch (error: any) {
     console.error('Failed to reindex account:', error);
-    return apiError('Internal server error', 500);
+    return apiError(error instanceof AdmissionError ? error.message : 'Internal server error', error instanceof AdmissionError ? (error.unavailable ? 503 : 429) : 500);
   }
 }

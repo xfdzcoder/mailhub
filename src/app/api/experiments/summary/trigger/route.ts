@@ -7,7 +7,8 @@ import {
   apiError,
 } from '@/lib/auth/middleware';
 import { summaryQueue } from '@/lib/queue/client';
-import { executeSummaryRun } from '@/lib/queue/workers/summary';
+import { createHash } from 'node:crypto';
+import { AdmissionError, reserve } from '@/lib/workload/admission';
 import { accountAccessWhere } from '@/lib/accounts/access';
 
 export async function POST(req: NextRequest) {
@@ -40,9 +41,20 @@ export async function POST(req: NextRequest) {
       return apiError('Label not found', 404);
     }
 
-    // Create EmailSummaryRun record
+    const parsedLimit = Math.min(100, Math.max(1, Number(limit) || 25));
+    const parsedTimeRangeHours = Math.min(720, Math.max(1, Number(timeRangeHours) || 24));
+    const uniqueWebhookIds = Array.isArray(webhookIds)
+      ? Array.from(new Set(webhookIds.filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0))).sort().slice(0, 20)
+      : [];
+    // Coalesce identical interactive triggers in a five-minute scheduling window.
+    const key = createHash('sha256').update(JSON.stringify([auth.userId, auth.organizationId, label.id, parsedLimit, parsedTimeRangeHours, uniqueWebhookIds, Math.floor(Date.now() / 300000)])).digest('hex');
+    const runId = `${key.slice(0, 8)}-${key.slice(8, 12)}-4${key.slice(13, 16)}-8${key.slice(17, 20)}-${key.slice(20, 32)}`;
+    await reserve(auth, 'queued', `bull:email-summary:${runId}`);
+    const existing = await prisma.emailSummaryRun.findUnique({ where: { id: runId } });
+    if (existing) return apiResponse({ summaryRunId: existing.id, status: existing.status, labelName: existing.labelName }, 200);
     const summaryRun = await prisma.emailSummaryRun.create({
       data: {
+        id: runId,
         organizationId: auth.organizationId,
         userId: auth.userId,
         labelId: label.id,
@@ -51,19 +63,12 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    const parsedLimit = Number(limit);
-    const parsedTimeRangeHours = Number(timeRangeHours);
-
     // Initialize real-time agent tracker in Redis
     const { initAgentRun } = await import('@/lib/ai/agent-tracker');
     await initAgentRun(summaryRun.id, label.name, {
       timeRangeHours: isNaN(parsedTimeRangeHours) ? 0 : parsedTimeRangeHours,
       limit: isNaN(parsedLimit) ? 0 : parsedLimit,
     });
-
-    const uniqueWebhookIds = Array.isArray(webhookIds)
-      ? Array.from(new Set(webhookIds.filter((id: any) => typeof id === 'string' && id.trim().length > 0)))
-      : [];
 
     const payload = {
       summaryRunId: summaryRun.id,
@@ -75,15 +80,11 @@ export async function POST(req: NextRequest) {
       limit: isNaN(parsedLimit) ? 0 : parsedLimit,
     };
 
-    // 1. Enqueue to BullMQ for dedicated worker processes
     try {
-      await summaryQueue.add('generate-summary', payload);
-    } catch (err) {
-      console.warn('BullMQ enqueue failed, falling back to direct summary execution:', err);
-      // Fallback: run directly only if queue enqueue failed
-      executeSummaryRun(payload).catch((execErr) => {
-        console.error('Direct summary execution error:', execErr);
-      });
+      await summaryQueue.add('generate-summary', payload, { jobId: summaryRun.id });
+    } catch (error) {
+      await prisma.emailSummaryRun.update({ where: { id: summaryRun.id }, data: { status: 'FAILED', errorMessage: 'Admission or enqueue failed' } });
+      throw error;
     }
 
     return apiResponse(
@@ -95,6 +96,6 @@ export async function POST(req: NextRequest) {
       201
     );
   } catch (err: any) {
-    return apiError(err.message || 'Failed to trigger summary job', 500);
+    return apiError(err.message || 'Failed to trigger summary job', err instanceof AdmissionError ? (err.unavailable ? 503 : 429) : 503);
   }
 }

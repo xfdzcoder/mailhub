@@ -58,6 +58,7 @@ jest.mock('../../../lib/ai/summary-service', () => ({
 describe('Email Summary Worker', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (prisma.emailSummaryRun.findUnique as jest.Mock).mockImplementation(async ({ where }: { where: { id: string } }) => ({ id: where.id, organizationId: 'org-1', userId: 'user-1', labelId: 'label-1' }));
     (prisma.systemPreference.upsert as jest.Mock).mockResolvedValue({ isAiEnabled: true, semanticSearchEnabled: true });
     (prisma.organizationMember.findUnique as jest.Mock).mockResolvedValue({ semanticSearchEnabled: true });
   });

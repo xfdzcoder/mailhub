@@ -1,3 +1,5 @@
+import { withWork } from '@/lib/workload/admission';
+import { accountWorkOwner } from '@/lib/workload/ownership';
 import { prisma } from '@/lib/db/prisma';
 import { parseEmail } from '@/lib/imap/email-parser';
 import { resolveThreadId } from '@/lib/imap/threading';
@@ -150,6 +152,10 @@ export class GmailSyncManager {
    * Polls for new emails since the last sync.
    */
   private async pollNewEmails(accountId: string, organizationId: string): Promise<SyncResult> {
+    return withWork(await accountWorkOwner(accountId), () => this.pollAdmitted(accountId, organizationId));
+  }
+
+  private async pollAdmitted(accountId: string, organizationId: string): Promise<SyncResult> {
     if (this.pollingAccountIds.has(accountId)) {
       console.log(`Gmail poll already in progress for account ${accountId}`);
       return { processed: 0, failed: 0 };

@@ -1,3 +1,5 @@
+jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run() }));
+jest.mock('@/lib/workload/ownership', () => ({ accountWorkOwner: async () => ({ userId: 'user-1', organizationId: 'org-1' }) }));
 jest.mock('@/lib/notifications/push', () => ({ sendPush: jest.fn(), reportPushFailure: jest.fn() }));
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
@@ -32,6 +34,7 @@ describe('account-scoped web push delivery', () => {
     });
 
     expect(prisma.pushSubscription.findMany).toHaveBeenCalledWith({
+      take: 100,
       where: {
         organizationId: 'org-1',
         userId: { not: null },

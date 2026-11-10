@@ -1,3 +1,5 @@
+jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(), AdmissionError: class extends Error {} }));
+jest.mock('@/lib/workload/send-once', () => ({ claimSend: async () => true }));
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
   apiResponse: (data: unknown, status = 200) =>
@@ -176,7 +178,7 @@ describe('POST sent email', () => {
       params: Promise.resolve({ id: 'account-1' }),
     });
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(502);
     expect(mockCreateEmail).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
