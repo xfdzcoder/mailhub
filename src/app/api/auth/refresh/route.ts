@@ -1,8 +1,9 @@
+import { protectAuthentication } from '@/lib/auth/attempts';
 import { NextRequest, NextResponse } from 'next/server';
 import { rotateSession, SessionError } from '@/lib/auth/sessions';
 import { setSessionCookies } from '@/lib/auth/cookies';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   const token = req.cookies.get('refresh-token')?.value;
   if (!token) return NextResponse.json({ error: 'Login required', code: 'AUTH_REQUIRED' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
   try {
@@ -18,3 +19,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Refresh temporarily unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
 }
+
+export const POST = protectAuthentication('refresh', handlePOST);
