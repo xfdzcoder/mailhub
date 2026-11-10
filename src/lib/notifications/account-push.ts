@@ -1,3 +1,4 @@
+import { sendPush, reportPushFailure } from './push';
 import { prisma } from '@/lib/db/prisma';
 
 export interface AccountPushNotification {
@@ -32,13 +33,6 @@ export async function sendAccountPushNotification(
 
   if (subscriptions.length === 0) return;
 
-  const webpush = require('web-push');
-  webpush.setVapidDetails(
-    process.env.VAPID_SUBJECT || 'mailto:support@mailhub.local',
-    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY as string,
-    process.env.VAPID_PRIVATE_KEY as string
-  );
-
   const payload = JSON.stringify({
     title: notification.title,
     body: notification.body,
@@ -47,8 +41,7 @@ export async function sendAccountPushNotification(
 
   await Promise.all(
     subscriptions.map((subscription) =>
-      webpush
-        .sendNotification(
+      sendPush(
           {
             endpoint: subscription.endpoint,
             keys: {
@@ -56,6 +49,7 @@ export async function sendAccountPushNotification(
               auth: subscription.auth,
             },
           },
+          subscription.userId!,
           payload
         )
         .catch(async (error: { statusCode?: number }) => {
@@ -66,7 +60,7 @@ export async function sendAccountPushNotification(
             return;
           }
 
-          console.error('Push notification failed:', error);
+          reportPushFailure(error);
         })
     )
   );

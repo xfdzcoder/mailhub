@@ -4,11 +4,12 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest, type RequestOptions } from 'node:https';
 import { cidrContains, isPublicIpAddress, parseCidr, type OutboundHostLookup } from './outbound-host';
 
-export type OutboundPurpose = 'model' | 'notification';
+export type OutboundPurpose = 'model' | 'notification' | 'push';
 
 const policyEnvironment: Record<OutboundPurpose, string> = {
   model: 'MODEL_ORIGIN_POLICY',
   notification: 'NOTIFICATION_ORIGIN_POLICY',
+  push: 'PUSH_ORIGIN_POLICY',
 };
 
 export class OriginPolicyError extends Error {
@@ -19,15 +20,15 @@ export class OriginPolicyError extends Error {
 }
 
 /** Reject parser repairs and URL components that are ambiguous for endpoint joining. */
-export function modelUrl(value: string): URL {
-  return outboundUrl(value, 'model');
+export function modelUrl(value: string, allowSearch = false): URL {
+  return outboundUrl(value, 'model', allowSearch);
 }
 
-function outboundUrl(value: string, purpose: OutboundPurpose): URL {
+function outboundUrl(value: string, purpose: OutboundPurpose, allowSearch = purpose !== 'model'): URL {
   if (!/^https?:\/\/[^/]/i.test(value) || /[\s\\]/.test(value)) throw new OriginPolicyError(purpose);
   let url: URL;
   try { url = new URL(value); } catch { throw new OriginPolicyError(purpose); }
-  if (url.username || url.password || url.hash || (purpose === 'model' && url.search) || url.hostname.endsWith('.')) throw new OriginPolicyError(purpose);
+  if (url.username || url.password || url.hash || (!allowSearch && url.search) || url.hostname.endsWith('.')) throw new OriginPolicyError(purpose);
   const authority = value.split('/')[2];
   if (authority.includes('@') || authority.includes('%') || authority.endsWith(':')) throw new OriginPolicyError(purpose);
   // Reject alternate IPv4 spellings (integer, octal, hex, shortened forms).
@@ -40,7 +41,11 @@ type Rule = { origin: string; addresses?: string[] };
 
 /** Purpose-specific deployment configuration; never read notification or tenant settings. */
 function originRules(purpose: OutboundPurpose): Rule[] {
-  const defaults: Rule[] = purpose === 'model' ? [{ origin: 'https://api.openai.com' }, { origin: 'https://api.anthropic.com' }] : [];
+  const defaults: Rule[] = purpose === 'model' ? [{ origin: 'https://api.openai.com' }, { origin: 'https://api.anthropic.com' }] : purpose === 'push' ? [
+    { origin: 'https://fcm.googleapis.com' },
+    { origin: 'https://updates.push.services.mozilla.com' },
+    { origin: 'https://web.push.apple.com' },
+  ] : [];
   const configured = process.env[policyEnvironment[purpose]];
   if (!configured) return defaults;
   try {
@@ -62,6 +67,7 @@ export async function resolveModelTarget(url: URL, dns: OutboundHostLookup = loo
 }
 
 export async function resolveOriginTarget(purpose: OutboundPurpose, url: URL, dns: OutboundHostLookup = lookup as OutboundHostLookup) {
+  if (purpose === 'push' && url.protocol !== 'https:') throw new OriginPolicyError(purpose);
   const rule = originRules(purpose).find(rule => rule.origin === url.origin);
   if (!rule) throw new OriginPolicyError(purpose);
   const host = url.hostname.replace(/^\[|\]$/g, '');
@@ -84,6 +90,14 @@ export async function modelPostJson(endpoint: string, headers: Record<string, st
 export async function postJsonWithPolicy(purpose: OutboundPurpose, endpoint: string, headers: Record<string, string>, body: string,
   limits = { connectMs: 5_000, totalMs: 20_000, responseBytes: 2 * 1024 * 1024 },
 ): Promise<unknown> {
+  const result = await postWithPolicy(purpose, endpoint, headers, body, limits);
+  if (result.status < 200 || result.status >= 300) throw new Error('Provider returned an unsuccessful status');
+  return JSON.parse(result.body);
+}
+
+export async function postWithPolicy(purpose: OutboundPurpose, endpoint: string, headers: Record<string, string>, body: string | Buffer,
+  limits = { connectMs: 5_000, totalMs: 20_000, responseBytes: 2 * 1024 * 1024 },
+): Promise<{ status: number; body: string }> {
   return requestWithPolicy(purpose, endpoint, headers, body, limits, true);
 }
 
@@ -91,18 +105,22 @@ export async function postJsonWithPolicy(purpose: OutboundPurpose, endpoint: str
 export async function notificationPost(endpoint: string, headers: Record<string, string>, body: string,
   limits = { connectMs: 5_000, totalMs: 20_000, responseBytes: 64 * 1024 },
 ): Promise<{ statusCode: number }> {
-  return requestWithPolicy('notification', endpoint, headers, body, limits, false) as Promise<{ statusCode: number }>;
+  const result = await requestWithPolicy('notification', endpoint, headers, body, limits, false);
+  if (result.status < 200 || result.status >= 300) throw new OutboundStatusError(result.status);
+  return { statusCode: result.status };
 }
 
-async function requestWithPolicy(purpose: OutboundPurpose, endpoint: string, headers: Record<string, string>, body: string,
-  limits: { connectMs: number; totalMs: number; responseBytes: number }, parseJson: boolean,
-): Promise<unknown> {
+async function requestWithPolicy(purpose: OutboundPurpose, endpoint: string, headers: Record<string, string>, body: string | Buffer,
+  limits: { connectMs: number; totalMs: number; responseBytes: number }, collectBody: boolean,
+): Promise<{ status: number; body: string }> {
   const url = outboundUrl(endpoint, purpose);
-  // Never permit callers to change authority, framing, proxy routing or upgrades.
+  // Push headers are generated by web-push, including its content-length header.
+  // Never permit custom model/notification headers to change routing or framing.
   const forbidden = /^(host|:.*|connection|content-length|transfer-encoding|te|trailer|upgrade|expect|proxy-.*|forwarded|x-forwarded-.*|x-original-.*|x-rewrite-.*|x-real-ip|x-http-method-override|x-method-override|via)$/i;
-  if (Object.entries(headers).some(([name, value]) => forbidden.test(name) || !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(name) || /[\r\n\x00]/.test(value))) {
+  if (purpose !== 'push' && Object.entries(headers).some(([name, value]) => forbidden.test(name) || !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(name) || /[\r\n\x00]/.test(value))) {
     throw new Error('Outbound custom header is not permitted');
   }
+
   // The total deadline includes DNS resolution and body consumption.
   const signal = AbortSignal.timeout(limits.totalMs);
   const target = await new Promise<Awaited<ReturnType<typeof resolveModelTarget>>>((resolve, reject) => {
@@ -118,7 +136,8 @@ async function requestWithPolicy(purpose: OutboundPurpose, endpoint: string, hea
       lookup: (_hostname, _options, callback) => callback(null, target.address, target.family),
     };
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, requestOptions, response => {
-      if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+      if (!response.statusCode || (response.statusCode >= 300 && response.statusCode < 400) ||
+        (purpose !== 'push' && (response.statusCode < 200 || response.statusCode >= 300))) {
         response.destroy();
         reject(new OutboundStatusError(response.statusCode));
         return;
@@ -129,11 +148,11 @@ async function requestWithPolicy(purpose: OutboundPurpose, endpoint: string, hea
         size += chunk.length;
         if (size > limits.responseBytes) {
           response.destroy(new Error('Outbound response limit exceeded'));
-        } else if (parseJson) chunks.push(chunk);
+        } else if (collectBody) chunks.push(chunk);
       });
       response.on('error', reject);
       response.on('end', () => {
-        try { resolve(parseJson ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : { statusCode: response.statusCode! }); } catch (error) { reject(error); }
+        resolve({ status: response.statusCode!, body: Buffer.concat(chunks).toString('utf8') });
       });
     });
     const timer = setTimeout(() => request.destroy(new Error('Outbound connection deadline exceeded')), limits.connectMs);
