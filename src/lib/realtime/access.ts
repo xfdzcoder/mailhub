@@ -29,9 +29,12 @@ export function formatAccessibleSseMessage(
       return null;
     }
 
-    return typeof parsed.event === 'string' && parsed.event
-      ? `event: ${parsed.event}\ndata: ${message}\n\n`
-      : `data: ${message}\n\n`;
+    if (!['new_email', 'initial_sync_complete', 'sync_progress'].includes(String(parsed.event))) {
+      return null;
+    }
+
+    // Events invalidate client queries; mail contents and producer metadata are private.
+    return `event: ${parsed.event}\ndata: ${JSON.stringify({ accountId: parsed.accountId })}\n\n`;
   } catch {
     return null;
   }

@@ -10,6 +10,9 @@ import {
 // since a Redis connection in subscriber mode cannot run regular commands.
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
+// Overflow closes the stream so EventSource can reconnect and refetch state.
+const MAX_PENDING_EVENTS = 100;
+const MAX_MESSAGE_LENGTH = 16 * 1024;
 const connections = new Map<string, number>();
 
 export async function GET(req: NextRequest) {
@@ -27,12 +30,16 @@ export async function GET(req: NextRequest) {
       start(controller) {
         let closed = false;
         let busy = false;
+        const pending: string[] = [];
+        let heartbeatPending = false;
         let subscriber: Redis | undefined;
         let heartbeat: ReturnType<typeof setInterval> | undefined;
         let lifetime: ReturnType<typeof setTimeout> | undefined;
         cleanup = () => {
           if (closed) return;
           closed = true;
+          pending.length = 0;
+          heartbeatPending = false;
           clearInterval(heartbeat);
           clearTimeout(lifetime);
           req.signal.removeEventListener('abort', cleanup);
@@ -42,22 +49,46 @@ export async function GET(req: NextRequest) {
           else connections.delete(key);
           try { controller.close(); } catch { /* Already cancelled. */ }
         };
-        const refresh = async (message?: string) => {
+        const drain = async () => {
           if (closed || busy) return;
           busy = true;
           try {
-            const current = await authenticate(req);
-            if (current instanceof NextResponse) { cleanup(); return; }
-            const allowed = await loadAccessibleRealtimeAccountIds(current);
-            if (closed) return;
-            if (message !== undefined) {
-              const formatted = formatAccessibleSseMessage(message, allowed);
-              if (formatted) controller.enqueue(formatted);
-            } else {
-              controller.enqueue(': heartbeat\n\n');
+            while (!closed && (pending.length || heartbeatPending)) {
+              const message = pending.shift();
+              if (message === undefined) heartbeatPending = false;
+              const current = await authenticate(req);
+              if (closed) return;
+              if (current instanceof NextResponse ||
+                  current.userId !== auth.userId ||
+                  current.organizationId !== auth.organizationId) {
+                cleanup();
+                return;
+              }
+              const allowed = await loadAccessibleRealtimeAccountIds(current);
+              if (closed) return;
+              const formatted = message === undefined
+                ? ': heartbeat\n\n'
+                : formatAccessibleSseMessage(message, allowed);
+              if (formatted) {
+                // Bound the controller queue as well as the authorization queue.
+                if ((controller.desiredSize ?? 0) <= 0) { cleanup(); return; }
+                controller.enqueue(formatted);
+              }
             }
           } catch { cleanup(); }
           finally { busy = false; }
+        };
+        const refresh = (message?: string) => {
+          if (closed) return;
+          if (message === undefined) heartbeatPending = true;
+          else {
+            if (message.length > MAX_MESSAGE_LENGTH || pending.length >= MAX_PENDING_EVENTS) {
+              cleanup();
+              return;
+            }
+            pending.push(message);
+          }
+          void drain();
         };
         req.signal.addEventListener('abort', cleanup);
         if (req.signal.aborted) { cleanup(); return; }
@@ -76,7 +107,7 @@ export async function GET(req: NextRequest) {
         } catch { cleanup(); }
       },
       cancel() { cleanup(); },
-    });
+    }, { highWaterMark: MAX_PENDING_EVENTS });
 
     return new Response(stream, {
       headers: {
