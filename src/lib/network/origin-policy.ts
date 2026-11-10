@@ -13,22 +13,26 @@ const policyEnvironment: Record<OutboundPurpose, string> = {
 
 export class OriginPolicyError extends Error {
   constructor(purpose: OutboundPurpose = 'model') {
-    super(`Outbound ${purpose} destination is not approved. Ask the instance operator to configure ${policyEnvironment[purpose]}; custom model endpoints require a tenant API key or no key.`);
+    super(`Outbound ${purpose} destination is not approved. Ask the instance operator to configure ${policyEnvironment[purpose]}; ${purpose === 'model' ? 'custom model endpoints require a tenant API key or no key.' : 'notification approval is separate from model approval.'}`);
     this.name = 'OriginPolicyError';
   }
 }
 
 /** Reject parser repairs and URL components that are ambiguous for endpoint joining. */
 export function modelUrl(value: string): URL {
-  if (!/^https?:\/\/[^/]/i.test(value) || /[\s\\]/.test(value)) throw new OriginPolicyError();
+  return outboundUrl(value, 'model');
+}
+
+function outboundUrl(value: string, purpose: OutboundPurpose): URL {
+  if (!/^https?:\/\/[^/]/i.test(value) || /[\s\\]/.test(value)) throw new OriginPolicyError(purpose);
   let url: URL;
-  try { url = new URL(value); } catch { throw new OriginPolicyError(); }
-  if (url.username || url.password || url.hash || url.search || url.hostname.endsWith('.')) throw new OriginPolicyError();
+  try { url = new URL(value); } catch { throw new OriginPolicyError(purpose); }
+  if (url.username || url.password || url.hash || (purpose === 'model' && url.search) || url.hostname.endsWith('.')) throw new OriginPolicyError(purpose);
   const authority = value.split('/')[2];
-  if (authority.includes('@') || authority.includes('%') || authority.endsWith(':')) throw new OriginPolicyError();
+  if (authority.includes('@') || authority.includes('%') || authority.endsWith(':')) throw new OriginPolicyError(purpose);
   // Reject alternate IPv4 spellings (integer, octal, hex, shortened forms).
   const rawHost = authority.startsWith('[') ? authority.slice(0, authority.indexOf(']') + 1) : authority.split(':')[0];
-  if (isIP(url.hostname) === 4 && rawHost !== url.hostname) throw new OriginPolicyError();
+  if (isIP(url.hostname) === 4 && rawHost !== url.hostname) throw new OriginPolicyError(purpose);
   return url;
 }
 
@@ -80,11 +84,29 @@ export async function modelPostJson(endpoint: string, headers: Record<string, st
 export async function postJsonWithPolicy(purpose: OutboundPurpose, endpoint: string, headers: Record<string, string>, body: string,
   limits = { connectMs: 5_000, totalMs: 20_000, responseBytes: 2 * 1024 * 1024 },
 ): Promise<unknown> {
-  const url = modelUrl(endpoint);
+  return requestWithPolicy(purpose, endpoint, headers, body, limits, true);
+}
+
+/** Notification replies need not be JSON; discard them under a smaller byte cap. */
+export async function notificationPost(endpoint: string, headers: Record<string, string>, body: string,
+  limits = { connectMs: 5_000, totalMs: 20_000, responseBytes: 64 * 1024 },
+): Promise<{ statusCode: number }> {
+  return requestWithPolicy('notification', endpoint, headers, body, limits, false) as Promise<{ statusCode: number }>;
+}
+
+async function requestWithPolicy(purpose: OutboundPurpose, endpoint: string, headers: Record<string, string>, body: string,
+  limits: { connectMs: number; totalMs: number; responseBytes: number }, parseJson: boolean,
+): Promise<unknown> {
+  const url = outboundUrl(endpoint, purpose);
+  // Never permit callers to change authority, framing, proxy routing or upgrades.
+  const forbidden = /^(host|:.*|connection|content-length|transfer-encoding|te|trailer|upgrade|expect|proxy-.*|forwarded|x-forwarded-.*|x-original-.*|x-rewrite-.*|x-real-ip|x-http-method-override|x-method-override|via)$/i;
+  if (Object.entries(headers).some(([name, value]) => forbidden.test(name) || !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(name) || /[\r\n\x00]/.test(value))) {
+    throw new Error('Outbound custom header is not permitted');
+  }
   // The total deadline includes DNS resolution and body consumption.
   const signal = AbortSignal.timeout(limits.totalMs);
   const target = await new Promise<Awaited<ReturnType<typeof resolveModelTarget>>>((resolve, reject) => {
-    const abort = () => reject(new Error('Model request deadline exceeded'));
+    const abort = () => reject(new Error('Outbound request deadline exceeded'));
     signal.addEventListener('abort', abort, { once: true });
     resolveOriginTarget(purpose, url).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
@@ -98,7 +120,7 @@ export async function postJsonWithPolicy(purpose: OutboundPurpose, endpoint: str
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, requestOptions, response => {
       if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
         response.destroy();
-        reject(new Error('Model provider returned an unsuccessful status'));
+        reject(new OutboundStatusError(response.statusCode));
         return;
       }
       let size = 0;
@@ -106,18 +128,31 @@ export async function postJsonWithPolicy(purpose: OutboundPurpose, endpoint: str
       response.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > limits.responseBytes) {
-          response.destroy(new Error('Model response limit exceeded'));
-        } else chunks.push(chunk);
+          response.destroy(new Error('Outbound response limit exceeded'));
+        } else if (parseJson) chunks.push(chunk);
       });
       response.on('error', reject);
       response.on('end', () => {
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (error) { reject(error); }
+        try { resolve(parseJson ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : { statusCode: response.statusCode! }); } catch (error) { reject(error); }
       });
     });
-    const timer = setTimeout(() => request.destroy(new Error('Model connection deadline exceeded')), limits.connectMs);
-    request.on('socket', socket => socket.once(url.protocol === 'https:' ? 'secureConnect' : 'connect', () => clearTimeout(timer)));
+    const timer = setTimeout(() => request.destroy(new Error('Outbound connection deadline exceeded')), limits.connectMs);
+    request.on('socket', socket => socket.once(url.protocol === 'https:' ? 'secureConnect' : 'connect', () => {
+      clearTimeout(timer);
+      const remote = socket.remoteAddress?.replace(/^::ffff:/, '');
+      const expected = target.address.replace(/^::ffff:/, '');
+      const range = parseCidr(expected);
+      if (!remote || !range || !cidrContains(range, remote)) request.destroy(new OriginPolicyError(purpose));
+    }));
     request.on('close', () => clearTimeout(timer));
     request.on('error', reject);
     request.end(body);
   });
+}
+
+export class OutboundStatusError extends Error {
+  constructor(public readonly statusCode: number | undefined) {
+    super('Outbound destination returned an unsuccessful status');
+    this.name = 'OutboundStatusError';
+  }
 }
