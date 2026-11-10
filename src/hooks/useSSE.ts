@@ -88,16 +88,16 @@ export function useSSE() {
       console.log('Received new email event', event.data);
       try {
         const data = JSON.parse(event.data);
-        if (data.subject && data.from) {
+        if (typeof data.accountId === 'string' && data.accountId.length > 0) {
           // Show in-app toast
-          toast.success(`New email from ${data.from}: ${data.subject}`, {
+          toast.success('New email received', {
             duration: 4000,
           });
 
           // Show native device notification
           if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-            const notification = new Notification(`New email from ${data.from}`, {
-              body: data.subject,
+            const notification = new Notification('New email received', {
+              body: 'Open MailHub to view your inbox.',
               icon: '/favicon.ico', // Optional fallback icon
             });
 
