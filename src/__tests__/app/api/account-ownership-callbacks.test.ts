@@ -150,10 +150,27 @@ for (const provider of ['google', 'microsoft'] as const) {
       expect((await callback(request(t.state, ''))).headers.get('location')).toContain('missing_oauth_params');
       expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state'); noMutation();
     });
-    it('rejects an untrusted callback origin without consuming state', async () => {
+    it('accepts standalone adapter URLs while ignoring forwarded origins', async () => {
+      process.env.NEXT_PUBLIC_APP_URL = 'https://mail.example.com';
       const t = await transaction();
-      const response = await callback(request(t.state, 'code=test', 'https://attacker.example'));
-      expect(response.headers.get('location')).toBe('http://localhost/settings/accounts?error=invalid_callback_origin');
+      // attachRequestMeta supplies the standalone listening address as initURL;
+      // fromNodeNextRequest preserves that origin for the route request.
+      const req = request(t.state, 'code=test', 'https://0.0.0.0:3000');
+      req.headers.set('host', 'attacker.example');
+      req.headers.set('x-forwarded-host', 'attacker.example');
+      req.headers.set('x-forwarded-proto', 'http');
+      req.headers.set('forwarded', 'host=attacker.example;proto=http');
+      const response = await callback(req);
+      expect(response.headers.get('location')).toBe('https://mail.example.com/settings/accounts?success=true&accountId=created&share=1');
+      const redirectUri = `https://mail.example.com/api/accounts/oauth/${provider}/callback`;
+      expect(fetchMock.mock.calls[0][1].body.get('redirect_uri')).toBe(redirectUri);
+      expect(store.eval).toHaveBeenCalledWith(CONSUME_TRANSACTION, 1, `oauth:transaction:${t.state}`, provider, 'session-1', 'user-1', 'org-1', redirectUri);
+      expect((await callback(req)).headers.get('location')).toContain('invalid_state');
+    });
+    it('rejects a changed configured public origin through transaction binding', async () => {
+      const t = await transaction();
+      process.env.NEXT_PUBLIC_APP_URL = 'https://mail.example.com';
+      expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state');
       expect(fetchMock).not.toHaveBeenCalled(); noMutation();
     });
     it.each(['before', 'after'])('rejects revoked sessions %s provider exchange', async when => {

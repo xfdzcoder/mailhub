@@ -71,7 +71,9 @@ export async function GET(req: NextRequest) {
     const auth = await verifyToken(token);
 
     const redirectUri = callbackUri('microsoft');
-    if (url.origin !== baseUrl || url.pathname !== new URL(redirectUri).pathname) {
+    // Standalone Next.js uses the listening address as the request origin.
+    // Bind the trusted public URI through the atomic transaction check below.
+    if (url.pathname !== new URL(redirectUri).pathname) {
       return NextResponse.redirect(new URL('/settings/accounts?error=invalid_callback_origin', baseUrl));
     }
     const state = await consumeOAuthTransaction(stateStr, 'microsoft', auth, redirectUri);
