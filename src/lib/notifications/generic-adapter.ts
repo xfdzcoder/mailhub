@@ -1,3 +1,4 @@
+import { notificationPost, OutboundStatusError, OriginPolicyError } from '../network/origin-policy';
 import { GenericWebhookConfig, WebhookDispatchResult } from './types';
 
 export async function sendGenericWebhookNotification(
@@ -35,34 +36,23 @@ export async function sendGenericWebhookNotification(
   }
 
   try {
-    const res = await fetch(config.url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok) {
-      const errorText = await res.text();
-      return {
-        success: false,
-        type: 'GENERIC',
-        statusCode: res.status,
-        error: `Generic Webhook error (${res.status}): ${errorText}`,
-        deliveredAt,
-      };
-    }
+    const res = await notificationPost(config.url, headers, JSON.stringify(payload));
 
     return {
       success: true,
       type: 'GENERIC',
-      statusCode: res.status,
+      statusCode: res.statusCode,
       deliveredAt,
     };
   } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
+    // Never persist remote bodies, URLs, path/query tokens or raw socket errors.
+    const errorMsg = err instanceof OriginPolicyError
+      ? 'Notification destination is not approved; ask the operator to configure NOTIFICATION_ORIGIN_POLICY'
+      : 'Notification delivery failed';
     return {
       success: false,
       type: 'GENERIC',
+      statusCode: err instanceof OutboundStatusError ? err.statusCode : undefined,
       error: errorMsg,
       deliveredAt,
     };

@@ -1,3 +1,4 @@
+import { protectSensitive } from '@/lib/auth/attempts';
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { authenticate, apiResponse, apiError } from '@/lib/auth/middleware';
@@ -8,7 +9,7 @@ import { parseEmail } from '@/lib/imap/email-parser';
 import { accountAccessWhere } from '@/lib/accounts/access';
 import { resolveSafeOutboundHost } from '@/lib/network/outbound-host';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   const auth = await authenticate(req);
   if (auth instanceof Response) return auth;
 
@@ -120,3 +121,5 @@ export async function POST(req: NextRequest) {
     return apiError(`Connection failed: ${err.message}`, 500);
   }
 }
+
+export const POST = protectSensitive('test-sync', handlePOST);
