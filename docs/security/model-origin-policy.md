@@ -25,7 +25,7 @@ only the smallest required ranges. Local, container and private services are
 supported but never implicitly trusted. Existing custom URLs need explicit
 approval before rollout; merely setting AI_BASE_URL does not approve an origin.
 Malformed policy fails closed. The mail host allowlist and notification settings
-have no effect on model approval. Notification adapters are outside this change.
+have no effect on model approval. Notification adapters use the separate [notification policy](notification-origin-policy.md).
 
 Tenant endpoints use the tenant key or no key. Shared AI_API_KEY/OPENAI_API_KEY
 credentials are used only when no tenant endpoint is selected, and only at

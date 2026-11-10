@@ -1,5 +1,11 @@
 jest.mock('@/lib/auth/middleware', () => ({ authenticate: jest.fn() }));
 jest.mock('@/lib/oauth/transactions', () => ({ createOAuthTransaction: jest.fn() }));
+// Endpoint fixtures isolate Redis; distributed policy is exercised separately.
+jest.mock('ioredis', () => class {
+  on() { return this; }
+  async eval() { return 1; }
+  async zrem() { return 1; }
+});
 
 import { NextRequest } from 'next/server';
 import { GET } from '@/app/api/accounts/oauth/google/init/route';

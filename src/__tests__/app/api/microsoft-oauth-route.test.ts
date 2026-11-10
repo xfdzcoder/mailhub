@@ -1,3 +1,9 @@
+// Endpoint fixtures isolate Redis; distributed policy is exercised separately.
+jest.mock('ioredis', () => class {
+  on() { return this; }
+  async eval() { return 1; }
+  async zrem() { return 1; }
+});
 import { POST as postMicrosoftOAuth } from '@/app/api/accounts/oauth/microsoft/route';
 
 describe('legacy Microsoft OAuth POST route', () => {

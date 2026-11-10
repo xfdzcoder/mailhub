@@ -27,6 +27,7 @@ jest.mock('@/lib/auth/sessions', () => ({
 jest.mock('@/lib/queue/client', () => ({ enqueueInitialSync: jest.fn() }));
 jest.mock('@/lib/accounts/service', () => ({ createOwnedAccount: jest.fn() }));
 jest.mock('@/lib/auth/middleware', () => ({ authenticate: jest.fn() }));
+jest.mock('@/lib/auth/attempts', () => ({ protectSensitive: (_scope: string, handler: unknown) => handler }));
 
 import { NextRequest } from 'next/server';
 import Redis from 'ioredis';

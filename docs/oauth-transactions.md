@@ -12,8 +12,11 @@ Set NEXT_PUBLIC_APP_URL to the trusted application origin (HTTPS, or HTTP on
 loopback for local development), without a path, credentials, query or fragment.
 There is no request-origin fallback. Register the corresponding
 /api/accounts/oauth/google/callback and /api/accounts/oauth/microsoft/callback
-URIs with the providers. Callback request origin and path must match the configured
-URI; forwarded headers are not trusted to choose the redirect destination.
+URIs with the providers. The callback path must match the configured URI, and the
+atomic transaction binds that trusted public URI. Standalone Next.js may use its
+internal listening address for the request origin behind a reverse proxy; that
+internal origin is not compared with the public URI. Forwarded headers are not
+trusted to choose the callback or redirect destination.
 
 An atomic Lua operation checks all bindings and deletes the transaction before
 processing a matching callback. Rejections, missing codes, token exchange failures,

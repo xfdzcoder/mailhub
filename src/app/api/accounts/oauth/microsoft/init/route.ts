@@ -1,9 +1,10 @@
+import { protectSensitive } from '@/lib/auth/attempts';
 import { NextRequest, NextResponse } from 'next/server';
 import { normalizeEmailAddress, isValidEmail } from '@/lib/email/addresses';
 import { authenticate } from '@/lib/auth/middleware';
 import { createOAuthTransaction } from '@/lib/oauth/transactions';
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const auth = await authenticate(req);
   if (auth instanceof NextResponse) return auth;
 
@@ -59,3 +60,5 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.redirect(oauthUrl.toString());
 }
+
+export const GET = protectSensitive('init', handleGET);

@@ -1,13 +1,12 @@
+import { protectAuthentication } from '@/lib/auth/attempts';
 import { NextRequest } from 'next/server';
 import { hash } from 'bcryptjs';
 import { prisma } from '@/lib/db/prisma';
-import { createSession, SessionError } from '@/lib/auth/sessions';
-import { setSessionCookies } from '@/lib/auth/cookies';
 import { registerSchema } from '@/lib/validation';
 import { apiError, apiResponse } from '@/lib/auth/middleware';
 import { createOrganizationSlug } from '@/lib/identifiers';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   if (process.env.REGISTRATION_MODE !== 'open') {
     return apiError('Self-registration is closed. Contact your instance administrator.', 403);
   }
@@ -22,17 +21,18 @@ export async function POST(req: NextRequest) {
 
     const { email, name, password, organizationName } = parsed.data;
 
-    // Check if user already exists
+    // Perform the same expensive work for claimed and available addresses.
+    const passwordHash = await hash(password, 12);
+    // Registration never confirms whether an address already exists.
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
-      return apiError('Email already registered', 409);
+      return apiResponse({ success: true }, 201);
     }
 
     // Create user, org, and membership in a transaction
-    const passwordHash = await hash(password, 12);
     const slug = createOrganizationSlug(organizationName);
 
-    const result = await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: { email, name, passwordHash },
       });
@@ -52,26 +52,13 @@ export async function POST(req: NextRequest) {
       return { user, org };
     });
 
-    const payload = {
-      userId: result.user.id,
-      organizationId: result.org.id,
-      role: 'admin' as const,
-    };
-
-    const pair = await createSession(payload, result.user.passwordHash);
-
-    const response = apiResponse(
-      {
-        user: { id: result.user.id, email, name },
-        organization: { id: result.org.id, name: organizationName, slug },
-      },
-      201
-    );
-
-    return setSessionCookies(response, pair);
+    return apiResponse({ success: true }, 201);
   } catch (error) {
-    if (error instanceof SessionError) return apiError('Please log in again', 401);
+    // Concurrent claims must have the same response as the existing-user path.
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') return apiResponse({ success: true }, 201);
     console.error('Registration error:', error);
     return apiError('Internal server error', 500);
   }
 }
+
+export const POST = protectAuthentication('register', handlePOST);
