@@ -48,7 +48,10 @@ jest.mock('@/lib/gmail/api', () => ({
 jest.mock('imapflow', () => ({ ImapFlow: jest.fn() }));
 jest.mock('nodemailer', () => ({ createTransport: jest.fn() }));
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'draft-message-id') }));
-jest.mock('fs/promises', () => ({ readFile: jest.fn() }));
+jest.mock('@/lib/email/outgoing-files', () => ({
+  readOutgoingFile: jest.fn(),
+  stageOutgoingFiles: jest.fn(async () => ({ files: [], cleanup: jest.fn() })),
+}));
 
 const mockMailComposer = jest.fn();
 jest.mock('nodemailer/lib/mail-composer', () => {
@@ -63,7 +66,7 @@ jest.mock('nodemailer/lib/mail-composer', () => {
 });
 
 import type { NextRequest } from 'next/server';
-import * as fs from 'fs/promises';
+import { readOutgoingFile } from '@/lib/email/outgoing-files';
 import { PUT as saveDraft } from '@/app/api/accounts/[id]/drafts/route';
 import { POST as syncDraft } from '@/app/api/accounts/[id]/drafts/sync/route';
 import { POST as markRead } from '@/app/api/accounts/[id]/read-all/route';
@@ -87,13 +90,14 @@ const memberWhere = {
     { memberAccess: { some: { userId: 'member-1' } } },
   ],
 };
-const mockReadFile = fs.readFile as jest.Mock;
+const mockReadFile = readOutgoingFile as jest.Mock;
 const mockGetValidAccessToken = getValidAccessToken as jest.Mock;
 const mockSyncDraftRaw = syncDraftRaw as jest.Mock;
 
 describe('related mail route account access', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    prisma.$transaction = jest.fn(async callback => callback(prisma)) as unknown as typeof prisma.$transaction;
     (authenticate as jest.Mock).mockResolvedValue({
       userId: 'member-1',
       organizationId: 'org-1',
@@ -219,7 +223,7 @@ describe('related mail route account access', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockReadFile).toHaveBeenCalledWith('.storage/attachments/att-draft-1');
+    expect(mockReadFile).toHaveBeenCalledWith('.storage/attachments/att-draft-1', 16 * 1024 * 1024);
     expect(mockMailComposer).toHaveBeenCalledWith(
       expect.objectContaining({
         attachments: [
@@ -235,6 +239,27 @@ describe('related mail route account access', () => {
       'access-token',
       Buffer.from('mime-message')
     );
+  });
+
+  it('rejects oversized historical draft files without uploading or deleting them', async () => {
+    (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValue({ id: 'account-1', provider: 'gmail' });
+    (prisma.email.findFirst as jest.Mock).mockResolvedValue({ id: 'draft-1', isDraft: true, subject: 'Historical', toAddresses: [], attachments: [{ filename: 'x', contentType: 'text/plain', storagePath: '/synthetic/file' }] });
+    const { OutgoingInputError } = await import('@/lib/email/outgoing-budget');
+    mockReadFile.mockRejectedValueOnce(new OutgoingInputError('Stored attachment exceeds outgoing limit'));
+    const response = await syncDraft(new Request('http://localhost', { method: 'POST', body: JSON.stringify({ draftId: 'draft-1' }) }) as NextRequest, { params: Promise.resolve({ id: 'account-1' }) });
+    expect(response.status).toBe(413);
+    expect(mockSyncDraftRaw).not.toHaveBeenCalled();
+    expect(mockMailComposer).not.toHaveBeenCalled();
+    expect(prisma.email.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects too many stored draft attachments before reading any files', async () => {
+    (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValue({ id: 'account-1', provider: 'gmail' });
+    (prisma.email.findFirst as jest.Mock).mockResolvedValue({ id: 'draft-1', isDraft: true, subject: 'Historical', toAddresses: [], attachments: Array.from({ length: 33 }, () => ({ storagePath: '/synthetic/file' })) });
+    const response = await syncDraft(new Request('http://localhost', { method: 'POST', body: JSON.stringify({ draftId: 'draft-1' }) }) as NextRequest, { params: Promise.resolve({ id: 'account-1' }) });
+    expect(response.status).toBe(413);
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(mockSyncDraftRaw).not.toHaveBeenCalled();
   });
 
   it('stores new drafts in the normalized DRAFTS folder', async () => {

@@ -1,3 +1,4 @@
+import { readOutgoingJson, validateOutgoingMail, OutgoingInputError } from '@/lib/email/outgoing-budget';
 import { NextRequest } from 'next/server';
 import { authenticate, apiResponse, apiError } from '@/lib/auth/middleware';
 import { sendEmailSchema } from '@/lib/validation';
@@ -7,9 +8,7 @@ import { prisma } from '@/lib/db/prisma';
 import { createEmailSnippet } from '@/lib/email/snippet';
 import { accountAccessWhere } from '@/lib/accounts/access';
 
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { randomUUID } from 'crypto';
+import { stageOutgoingFiles } from '@/lib/email/outgoing-files';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -29,12 +28,27 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   if (!account) return apiError('Account not found', 404);
 
-  const body = await req.json();
+  let body: unknown;
+  try { body = await readOutgoingJson(req); }
+  catch (error) {
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
+    throw error;
+  }
   const parsed = sendEmailSchema.safeParse(body);
   if (!parsed.success) return apiError(parsed.error.issues[0].message, 422);
+  try { validateOutgoingMail(parsed.data); }
+  catch (error) {
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
+    throw error;
+  }
 
+  let staged: Awaited<ReturnType<typeof stageOutgoingFiles>> | undefined;
+  let deliveredMessageId: string | undefined;
+  let published = false;
   try {
+    staged = await stageOutgoingFiles(parsed.data.attachments || []);
     const { messageId } = await sendEmail(accountId, parsed.data);
+    deliveredMessageId = messageId;
     const sentAt = new Date();
     const snippet = createEmailSnippet({
       bodyText: parsed.data.bodyText,
@@ -44,55 +58,40 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const hasAttachments = !!(parsed.data.attachments && parsed.data.attachments.length > 0);
 
     // Save sent email record
-    const email = await prisma.email.create({
-      data: {
-        accountId,
-        messageId,
-        threadId: parsed.data.inReplyTo || messageId, // Basic fallback
-        folder: 'SENT',
-        subject: parsed.data.subject,
-        snippet,
-        fromAddress: account.emailAddress,
-        toAddresses: parsed.data.to.map((address) => ({ address, name: '' })),
-        ccAddresses: parsed.data.cc?.map((address) => ({ address, name: '' })) || [],
-        bccAddresses: parsed.data.bcc?.map((address) => ({ address, name: '' })) || [],
-        inReplyTo: parsed.data.inReplyTo,
-        referencesHeader: parsed.data.references,
-        isRead: true, // Sent emails are read
-        hasAttachments,
-        sentAt,
-        receivedAt: sentAt,
-        body: {
-          create: {
-            bodyHtml: parsed.data.bodyHtml,
-            bodyText: parsed.data.bodyText,
+    const email = await prisma.$transaction(async (tx) => {
+      const email = await tx.email.create({
+        data: {
+          accountId,
+          messageId,
+          threadId: parsed.data.inReplyTo || messageId, // Basic fallback
+          folder: 'SENT',
+          subject: parsed.data.subject,
+          snippet,
+          fromAddress: account.emailAddress,
+          toAddresses: parsed.data.to.map((address) => ({ address, name: '' })),
+          ccAddresses: parsed.data.cc?.map((address) => ({ address, name: '' })) || [],
+          bccAddresses: parsed.data.bcc?.map((address) => ({ address, name: '' })) || [],
+          inReplyTo: parsed.data.inReplyTo,
+          referencesHeader: parsed.data.references,
+          isRead: true, // Sent emails are read
+          hasAttachments,
+          sentAt,
+          receivedAt: sentAt,
+          body: {
+            create: {
+              bodyHtml: parsed.data.bodyHtml,
+              bodyText: parsed.data.bodyText,
+            },
           },
         },
-      },
-    });
+      });
 
-    if (hasAttachments && parsed.data.attachments) {
-      const storageDir = path.join(process.cwd(), '.storage', 'attachments');
-      await fs.mkdir(storageDir, { recursive: true });
-
-      for (const att of parsed.data.attachments) {
-        const attachmentId = randomUUID();
-        const storagePath = path.join(storageDir, attachmentId);
-        const buffer = Buffer.from(att.content, 'base64');
-        await fs.writeFile(storagePath, buffer);
-
-        await prisma.attachment.create({
-          data: {
-            id: attachmentId,
-            emailId: email.id,
-            filename: att.filename,
-            contentType: att.contentType,
-            sizeBytes: att.sizeBytes || buffer.length,
-            storagePath,
-          },
-        });
+      for (const file of staged!.files) {
+        await tx.attachment.create({ data: { ...file, emailId: email.id } });
       }
-    }
+      return email;
+    });
+    published = true;
 
     await logActivity({
       organizationId: auth.organizationId,
@@ -112,6 +111,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     return apiResponse({ success: true, messageId, sentAt });
   } catch (error) {
+    if (!published) await staged?.cleanup();
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
+    if (deliveredMessageId) return apiResponse({ success: true, messageId: deliveredMessageId, warning: 'Message delivered; local persistence failed. Do not resend.' });
     console.error('Send email error:', error);
     return apiError('Failed to send email', 500);
   }

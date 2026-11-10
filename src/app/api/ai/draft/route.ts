@@ -1,3 +1,5 @@
+import { readOutgoingJson, checkBytes, outgoingLimits, OutgoingInputError } from '@/lib/email/outgoing-budget';
+import { z } from 'zod';
 import { NextRequest, NextResponse } from 'next/server';
 import { AiAccessError, AiUnavailableError, callLlmApi } from '@/lib/ai/llm-client';
 import { extractCleanEmailText } from '@/lib/email/clean-text';
@@ -9,7 +11,17 @@ export async function POST(req: Request) {
   if (auth instanceof Response) return auth;
 
   try {
-    const body = await req.json();
+    const body = z.object({
+      accountId: z.string().optional(), emailId: z.string().optional(),
+      prompt: z.string().optional(), existingText: z.string().optional(),
+      tone: z.string().optional(), length: z.string().optional(), action: z.string().optional(),
+      replyContext: z.object({ subject: z.string().optional(), body: z.string().optional() }).optional(),
+    }).safeParse(await readOutgoingJson(req));
+    if (!body.success) return NextResponse.json({ error: 'Invalid draft arguments' }, { status: 422 });
+    const limits = outgoingLimits();
+    for (const value of [body.data.prompt, body.data.existingText, body.data.replyContext?.body]) checkBytes(value, limits.bodyBytes, 'Draft text');
+    for (const value of [body.data.accountId, body.data.emailId, body.data.tone, body.data.length, body.data.action]) checkBytes(value, limits.argumentBytes, 'Draft argument');
+    checkBytes(body.data.replyContext?.subject, limits.headerBytes, 'Subject');
     const {
       accountId,
       emailId,
@@ -19,7 +31,7 @@ export async function POST(req: Request) {
       action = 'generate',
       existingText,
       replyContext,
-    } = body;
+    } = body.data;
 
     if (!prompt && !existingText) {
       return NextResponse.json({ error: 'Prompt or existing text is required' }, { status: 400 });
@@ -55,6 +67,7 @@ Respond ONLY with the email subject line (if applicable) and body content. Do no
 
     return NextResponse.json({ result: resultText, status: 'success' });
   } catch (err: any) {
+    if (err instanceof OutgoingInputError) return NextResponse.json({ error: err.message }, { status: err.status });
     if (err instanceof AiUnavailableError) {
       return NextResponse.json({ error: err.message, reason: err.reason }, { status: 503 });
     }

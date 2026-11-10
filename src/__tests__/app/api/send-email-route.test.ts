@@ -32,6 +32,7 @@ jest.mock('@/lib/activity/log', () => ({
 jest.mock('fs/promises', () => ({
   mkdir: jest.fn(),
   writeFile: jest.fn(),
+  unlink: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('crypto', () => ({
@@ -86,6 +87,7 @@ function createRequest(
 describe('POST sent email', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    prisma.$transaction = jest.fn(async (callback) => callback(prisma)) as unknown as typeof prisma.$transaction;
     mockAuthenticate.mockResolvedValue({
       userId: 'user-1',
       organizationId: 'org-1',
@@ -149,6 +151,7 @@ describe('POST sent email', () => {
     expect(mockCreateEmail.mock.calls[0][0].data.snippet).toHaveLength(300);
 
     jest.clearAllMocks();
+    prisma.$transaction = jest.fn(async (callback) => callback(prisma)) as unknown as typeof prisma.$transaction;
     mockAuthenticate.mockResolvedValue({
       userId: 'user-1',
       organizationId: 'org-1',
@@ -181,6 +184,30 @@ describe('POST sent email', () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it('rejects malformed attachments before writes or delivery', async () => {
+    const response = await POST(createRequest({ attachments: [{ filename: 'x', contentType: 'text/plain', content: 'Zh==' }] }), { params: Promise.resolve({ id: 'account-1' }) });
+    expect(response.status).toBe(422);
+    expect(mockWriteFile).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('cleans files and does not deliver after disk failure', async () => {
+    mockWriteFile.mockRejectedValueOnce(new Error('disk full'));
+    const response = await POST(createRequest({ attachments: [{ filename: 'x', contentType: 'text/plain', content: 'YWJj' }] }), { params: Promise.resolve({ id: 'account-1' }) });
+    expect(response.status).toBe(500);
+    expect(fs.unlink).toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockCreateEmail).not.toHaveBeenCalled();
+  });
+
+  it('reports confirmed delivery after local write failure without resending', async () => {
+    mockSendEmail.mockResolvedValue({ messageId: '<delivered@example.test>' });
+    mockCreateEmail.mockRejectedValueOnce(new Error('database unavailable'));
+    const response = await POST(createRequest(), { params: Promise.resolve({ id: 'account-1' }) });
+    expect(await response.json()).toMatchObject({ success: true, messageId: '<delivered@example.test>', warning: expect.stringContaining('Do not resend') });
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+  });
+
   it('stores sent attachments on local storage paths and keeps provider reference fields unset', async () => {
     mockSendEmail.mockResolvedValue({ messageId: '<attachment@example.com>' });
 
@@ -203,7 +230,8 @@ describe('POST sent email', () => {
     expect(mockMkdir).toHaveBeenCalled();
     expect(mockWriteFile).toHaveBeenCalledWith(
       expect.stringContaining('.storage'),
-      Buffer.from('pdf')
+      Buffer.from('pdf'),
+      { flag: 'wx' }
     );
     expect(mockCreateAttachment).toHaveBeenCalledWith({
       data: expect.objectContaining({
