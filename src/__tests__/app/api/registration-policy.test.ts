@@ -1,3 +1,9 @@
+// Endpoint fixtures isolate Redis; distributed policy is exercised separately.
+jest.mock('ioredis', () => class {
+  on() { return this; }
+  async eval() { return 1; }
+  async zrem() { return 1; }
+});
 jest.mock('@/lib/db/prisma', () => ({ prisma: { user: { findUnique: jest.fn() }, $transaction: jest.fn() } }));
 jest.mock('bcryptjs', () => ({ hash: jest.fn().mockResolvedValue('synthetic-password-hash') }));
 jest.mock('@/lib/auth/sessions', () => ({
@@ -11,7 +17,7 @@ jest.mock('@/lib/auth/middleware', () => ({
 }));
 jest.mock('@/lib/identifiers', () => ({ createOrganizationSlug: () => 'fixture-org' }));
 
-import type { NextRequest } from 'next/server';
+import { NextRequest } from 'next/server';
 import { POST } from '@/app/api/auth/register/route';
 import { prisma } from '@/lib/db/prisma';
 import { hash } from 'bcryptjs';
@@ -19,9 +25,9 @@ import { createSession } from '@/lib/auth/sessions';
 const previousMode = process.env.REGISTRATION_MODE;
 const input = { email: 'fixture@example.test', name: 'Fixture', password: 'test-password-only', organizationName: 'Fixture Org' };
 function request(body: unknown = input) {
-  return new Request('http://localhost/api/auth/register', { method: 'POST', body: JSON.stringify(body) }) as NextRequest;
+  return new NextRequest('http://localhost/api/auth/register', { method: 'POST', headers: { origin: 'http://localhost', 'content-type': 'application/json' }, body: JSON.stringify(body) });
 }
-beforeEach(() => { jest.clearAllMocks(); delete process.env.REGISTRATION_MODE; });
+beforeEach(() => { jest.clearAllMocks(); process.env.AUTH_TRUSTED_ORIGINS = 'http://localhost'; delete process.env.REGISTRATION_MODE; });
 afterAll(() => {
   if (previousMode === undefined) delete process.env.REGISTRATION_MODE;
   else process.env.REGISTRATION_MODE = previousMode;
@@ -41,11 +47,11 @@ it('preserves input validation when explicitly open', async () => {
   expect((await POST(request({}))).status).toBe(422);
   expect(prisma.$transaction).not.toHaveBeenCalled();
 });
-it('preserves existing-account conflict checks when open', async () => {
+it('returns the same acceptance for an already claimed address', async () => {
   process.env.REGISTRATION_MODE = 'open';
   (prisma.user.findUnique as jest.Mock).mockResolvedValue({ id: 'existing' });
-  expect((await POST(request())).status).toBe(409);
-  expect(hash).not.toHaveBeenCalled();
+  expect((await POST(request())).status).toBe(201);
+  expect(hash).toHaveBeenCalled();
 });
 it('creates an organization and its administrator only when open', async () => {
   process.env.REGISTRATION_MODE = 'open';
@@ -59,5 +65,15 @@ it('creates an organization and its administrator only when open', async () => {
   const response = await POST(request());
   expect(response.status).toBe(201);
   expect(membership).toHaveBeenCalledWith({ data: { organizationId: 'org-1', userId: 'user-1', role: 'admin' } });
-  expect(createSession).toHaveBeenCalledWith({ userId: 'user-1', organizationId: 'org-1', role: 'admin' }, 'synthetic-password-hash');
+  expect(createSession).not.toHaveBeenCalled();
+  expect(await response.json()).toEqual({ success: true });
+});
+it('does not expose an address claimed concurrently', async () => {
+  process.env.REGISTRATION_MODE = 'open';
+  (prisma.user.findUnique as jest.Mock).mockResolvedValue(null);
+  (prisma.$transaction as jest.Mock).mockRejectedValue({ code: 'P2002' });
+  const response = await POST(request());
+  expect(response.status).toBe(201);
+  expect(await response.json()).toEqual({ success: true });
+  expect(response.headers.has('set-cookie')).toBe(false);
 });

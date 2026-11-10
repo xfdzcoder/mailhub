@@ -1,3 +1,4 @@
+jest.mock('@/lib/auth/attempts', () => ({ protectSensitive: (_scope: string, handler: unknown) => handler }));
 jest.mock('@/lib/auth/middleware', () => ({ authenticate: jest.fn() }));
 jest.mock('@/lib/db/prisma', () => ({ prisma: { pushSubscription: { findMany: jest.fn().mockResolvedValue([]) } } }));
 jest.mock('@/lib/notifications/push', () => ({ sendPush: jest.fn(), reportPushFailure: jest.fn() }));
