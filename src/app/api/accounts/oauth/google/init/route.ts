@@ -1,7 +1,8 @@
 import { protectSensitive } from '@/lib/auth/attempts';
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticate } from '@/lib/auth/middleware';
-import { normalizeEmailAddress } from '@/lib/email/addresses';
+import { normalizeEmailAddress, isValidEmail } from '@/lib/email/addresses';
+import { createOAuthTransaction } from '@/lib/oauth/transactions';
 
 async function handleGET(req: NextRequest) {
   const auth = await authenticate(req);
@@ -17,24 +18,21 @@ async function handleGET(req: NextRequest) {
 
   const normalizedEmailAddress = normalizeEmailAddress(emailAddress);
 
-  // Encode the state to pass through the OAuth flow
-  const stateData = {
-    emailAddress: normalizedEmailAddress,
-    label,
-    organizationId: auth.organizationId,
-  };
-  const state = Buffer.from(JSON.stringify(stateData)).toString('base64');
-
   const clientId = process.env.GOOGLE_CLIENT_ID;
   if (!clientId) {
     return NextResponse.json({ error: 'Google Client ID not configured on server' }, { status: 500 });
   }
 
-  // Redirect URI must match what's in the Google Console exactly
-  // For local dev, we construct it using the request's origin
-  // Note: NEXT_PUBLIC_APP_URL is better, but falling back to req origin is safe
-  const origin = process.env.NEXT_PUBLIC_APP_URL || url.origin;
-  const redirectUri = `${origin}/api/accounts/oauth/google/callback`;
+  if (!isValidEmail(normalizedEmailAddress) || label.length > 200) {
+    return NextResponse.json({ error: 'Invalid mailbox or label' }, { status: 400 });
+  }
+  let transaction;
+  try {
+    transaction = await createOAuthTransaction('google', auth, normalizedEmailAddress, label);
+  } catch {
+    return NextResponse.json({ error: 'OAuth authorization unavailable; restart authorization' }, { status: 503 });
+  }
+  const { state, challenge, redirectUri } = transaction;
 
   const oauthUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   oauthUrl.searchParams.set('client_id', clientId);
@@ -48,6 +46,8 @@ async function handleGET(req: NextRequest) {
   oauthUrl.searchParams.set('access_type', 'offline');
   oauthUrl.searchParams.set('prompt', 'consent'); // Force consent to get refresh token
   oauthUrl.searchParams.set('state', state);
+  oauthUrl.searchParams.set('code_challenge', challenge);
+  oauthUrl.searchParams.set('code_challenge_method', 'S256');
   
   // Optionally use login_hint if we know the user's email
   oauthUrl.searchParams.set('login_hint', normalizedEmailAddress);

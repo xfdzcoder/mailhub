@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requestPolicy } from './request-policy';
 import { verifyToken } from './jwt';
 import { authorizeSession, SessionError } from './sessions';
+import type { SessionClaims } from './jwt';
 import type { JWTPayload } from './types';
 
 export async function authenticate(
   req: NextRequest
-): Promise<JWTPayload | NextResponse> {
+): Promise<SessionClaims | NextResponse> {
   const denied = requestPolicy(req);
   if (denied) return denied;
   const token = req.cookies.get('auth-token')?.value ||
