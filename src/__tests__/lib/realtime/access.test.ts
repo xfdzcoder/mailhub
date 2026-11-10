@@ -81,7 +81,7 @@ describe('realtime account audience', () => {
 
     expect(
       formatAccessibleSseMessage(message, new Set(['visible-account']))
-    ).toBe(`event: new_email\ndata: ${message}\n\n`);
+    ).toBe('event: new_email\ndata: {"accountId":"visible-account"}\n\n');
   });
 
   it('drops malformed or unscoped messages instead of forwarding unknown content', () => {
@@ -92,5 +92,17 @@ describe('realtime account audience', () => {
         new Set(['account-1'])
       )
     ).toBeNull();
+  });
+});
+
+describe('minimal realtime payloads', () => {
+  it.each(['new_email', 'initial_sync_complete', 'sync_progress'])('minimizes %s', event => {
+    expect(formatAccessibleSseMessage(JSON.stringify({
+      event, accountId: 'a', subject: 'secret', from: 'private', messageId: 'id',
+      folder: 'INBOX', progress: 10, nested: { token: 'secret' },
+    }), new Set(['a']))).toBe(`event: ${event}\ndata: {"accountId":"a"}\n\n`);
+  });
+  it.each(['unknown', 'new_email\ndata: injected', null])('rejects unknown event %s', event => {
+    expect(formatAccessibleSseMessage(JSON.stringify({ event, accountId: 'a' }), new Set(['a']))).toBeNull();
   });
 });
