@@ -1,619 +1,262 @@
-jest.mock('@/lib/db/prisma', () => ({
-  prisma: {
-    emailAccount: {
-      findUnique: jest.fn(),
-      findFirst: jest.fn(),
-      update: jest.fn(),
-      count: jest.fn(),
-    },
-  },
-}));
-
-jest.mock('@/lib/crypto', () => ({
-  encrypt: jest.fn((value: string) => `encrypted:${value}`),
-}));
-
+jest.mock('ioredis', () => {
+  const entries = new Map<string, { raw: string; expires: number }>();
+  return { __esModule: true, default: jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    set: jest.fn(async (key: string, raw: string, _ex: string, ttl: number) => {
+      entries.set(key, { raw, expires: Date.now() + ttl * 1000 });
+      return 'OK';
+    }),
+    eval: jest.fn(async (_script: string, _count: number, key: string, ...args: string[]) => {
+      const entry = entries.get(key);
+      if (!entry || entry.expires <= Date.now()) return null;
+      const t = JSON.parse(entry.raw);
+      if ([t.provider, t.sessionId, t.userId, t.organizationId, t.redirectUri].some((value, i) => value !== args[i])) return null;
+      entries.delete(key);
+      return entry.raw;
+    }),
+  })) };
+});
+jest.mock('@/lib/db/prisma', () => ({ prisma: { emailAccount: {
+  findFirst: jest.fn(), update: jest.fn(), count: jest.fn(),
+} } }));
+jest.mock('@/lib/crypto', () => ({ encrypt: jest.fn((value: string) => `encrypted:${value}`) }));
 jest.mock('@/lib/auth/sessions', () => ({
-  verifySessionToken: jest.fn(),
+  verifySessionToken: jest.fn(), authorizeSession: jest.fn(),
+  SessionError: class SessionError extends Error {},
 }));
+jest.mock('@/lib/queue/client', () => ({ enqueueInitialSync: jest.fn() }));
+jest.mock('@/lib/accounts/service', () => ({ createOwnedAccount: jest.fn() }));
+jest.mock('@/lib/auth/middleware', () => ({ authenticate: jest.fn() }));
+jest.mock('@/lib/auth/attempts', () => ({ protectSensitive: (_scope: string, handler: unknown) => handler }));
 
-jest.mock('@/lib/queue/client', () => ({
-  enqueueInitialSync: jest.fn(),
-}));
-
-jest.mock('@/lib/accounts/service', () => ({
-  createOwnedAccount: jest.fn(),
-}));
-
-import type { NextRequest } from 'next/server';
+import { NextRequest } from 'next/server';
+import Redis from 'ioredis';
+import { createHash } from 'node:crypto';
 import { GET as googleCallback } from '@/app/api/accounts/oauth/google/callback/route';
 import { GET as microsoftCallback } from '@/app/api/accounts/oauth/microsoft/callback/route';
+import { GET as googleInit } from '@/app/api/accounts/oauth/google/init/route';
+import { GET as microsoftInit } from '@/app/api/accounts/oauth/microsoft/init/route';
 import { prisma } from '@/lib/db/prisma';
 import { encrypt } from '@/lib/crypto';
-import { verifySessionToken as verifyToken } from '@/lib/auth/sessions';
+import { verifySessionToken, authorizeSession, SessionError } from '@/lib/auth/sessions';
+import { authenticate } from '@/lib/auth/middleware';
 import { enqueueInitialSync } from '@/lib/queue/client';
 import { createOwnedAccount } from '@/lib/accounts/service';
+import { createOAuthTransaction, CONSUME_TRANSACTION, trustedOrigin } from '@/lib/oauth/transactions';
 
-const mockFindUnique = prisma.emailAccount.findUnique as jest.Mock;
-const mockFindFirst = prisma.emailAccount.findFirst as jest.Mock;
-const mockUpdate = prisma.emailAccount.update as jest.Mock;
-const mockCount = prisma.emailAccount.count as jest.Mock;
-const mockEncrypt = encrypt as jest.Mock;
-const mockVerifyToken = verifyToken as jest.Mock;
-const mockEnqueueInitialSync = enqueueInitialSync as jest.Mock;
-const mockCreateOwnedAccount = createOwnedAccount as jest.Mock;
+const store = (Redis as unknown as jest.Mock).mock.results[0].value;
+const auth = { userId: 'user-1', organizationId: 'org-1', sessionId: 'session-1', tokenVersion: 0, role: 'member' as const };
 const fetchMock = jest.fn();
+global.fetch = fetchMock;
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
-global.fetch = fetchMock as typeof fetch;
-
-type ProviderCase = {
-  name: 'google' | 'microsoft';
-  callback: (req: NextRequest) => Promise<Response>;
-  tokenUrl: string;
-  identityUrl?: string;
-  env: {
-    clientId: string;
-    clientSecret: string;
-  };
-  emailProvider: 'gmail' | 'outlook';
-  oauthProvider: 'google' | 'microsoft';
-};
-
-const providerCases: ProviderCase[] = [
-  {
-    name: 'google',
-    callback: googleCallback,
-    tokenUrl: 'https://oauth2.googleapis.com/token',
-    identityUrl: 'https://www.googleapis.com/oauth2/v2/userinfo',
-    env: {
-      clientId: 'google-client-id',
-      clientSecret: 'google-client-secret',
-    },
-    emailProvider: 'gmail',
-    oauthProvider: 'google',
-  },
-  {
-    name: 'microsoft',
-    callback: microsoftCallback,
-    tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-    identityUrl: 'https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName',
-    env: {
-      clientId: 'microsoft-client-id',
-      clientSecret: 'microsoft-client-secret',
-    },
-    emailProvider: 'outlook',
-    oauthProvider: 'microsoft',
-  },
-];
-
-function accountLookupMock(provider: ProviderCase) {
-  return provider.name === 'microsoft' || provider.name === 'google'
-    ? mockFindFirst
-    : mockFindUnique;
-}
-
-function accountLookupArgs(provider: ProviderCase, emailAddress: string) {
-  return provider.name === 'microsoft' || provider.name === 'google'
-    ? {
-        where: {
-          organizationId: 'org-1',
-          emailAddress: { equals: emailAddress, mode: 'insensitive' },
-        },
-      }
-    : {
-        where: {
-          organizationId_emailAddress: {
-            organizationId: 'org-1',
-            emailAddress,
-          },
-        },
-      };
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-
-function encodeState(overrides: Record<string, unknown> = {}): string {
-  return Buffer.from(
-    JSON.stringify({
-      emailAddress: 'shared@example.com',
-      label: 'Shared Inbox',
-      organizationId: 'org-1',
-      ...overrides,
-    })
-  ).toString('base64');
-}
-
-function createRequest(options: {
-  code?: string;
-  error?: string;
-  stateOverrides?: Record<string, unknown>;
-} = {}): NextRequest {
-  const url = new URL('http://localhost/api/accounts/oauth/callback');
-  if (options.code !== null) {
-    url.searchParams.set('code', options.code ?? 'oauth-code');
+for (const provider of ['google', 'microsoft'] as const) {
+  const callback = provider === 'google' ? googleCallback : microsoftCallback;
+  const init = provider === 'google' ? googleInit : microsoftInit;
+  const callbackUrl = `http://localhost/api/accounts/oauth/${provider}/callback`;
+  const identity = provider === 'google' ? { email: 'Inbox@Example.com', verified_email: true } : { mail: 'Inbox@Example.com' };
+  async function transaction() { return createOAuthTransaction(provider, auth, 'inbox@example.com', 'Test Inbox'); }
+  function request(state?: string, params = 'code=test-code', origin = 'http://localhost') {
+    return new NextRequest(`${origin}/api/accounts/oauth/${provider}/callback?${params}${state ? `&state=${state}` : ''}`, {
+      headers: { cookie: 'auth-token=synthetic-session-token' },
+    });
   }
-  if (options.error) {
-    url.searchParams.set('error', options.error);
+  function noMutation() {
+    expect(encrypt).not.toHaveBeenCalled();
+    expect(prisma.emailAccount.update).not.toHaveBeenCalled();
+    expect(createOwnedAccount).not.toHaveBeenCalled();
+    expect(enqueueInitialSync).not.toHaveBeenCalled();
   }
-  if (options.stateOverrides !== null) {
-    url.searchParams.set('state', encodeState(options.stateOverrides));
-  }
-
-  return {
-    url: url.toString(),
-    cookies: {
-      get(name: string) {
-        return name === 'auth-token' ? { value: 'auth-token-value' } : undefined;
-      },
-    },
-  } as NextRequest;
-}
-
-function mockSuccessfulFetches(
-  provider: ProviderCase,
-  emailAddress = 'shared@example.com',
-  identity: Record<string, unknown> = provider.name === 'microsoft'
-    ? { mail: emailAddress }
-    : { email: emailAddress }
-) {
-  fetchMock.mockImplementation((input: string | URL | Request) => {
-    const url = input.toString();
-
-    if (url === provider.tokenUrl) {
-      return Promise.resolve(
-        jsonResponse({
-          access_token: `${provider.name}-access-token`,
-          refresh_token: `${provider.name}-refresh-token`,
-          expires_in: 3600,
-        })
-      );
-    }
-
-    if (provider.identityUrl && url === provider.identityUrl) {
-      return Promise.resolve(jsonResponse(identity));
-    }
-
-    return Promise.reject(new Error(`Unexpected fetch: ${url}`));
-  });
-}
-
-describe.each(providerCases)('$name OAuth callback ownership', (provider) => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockFindUnique.mockReset();
-    mockFindFirst.mockReset();
-    mockUpdate.mockReset();
-    mockCount.mockReset();
-    mockVerifyToken.mockReset();
-    mockEnqueueInitialSync.mockReset();
-    mockCreateOwnedAccount.mockReset();
-    fetchMock.mockReset();
-    mockEncrypt.mockImplementation((value: string) => `encrypted:${value}`);
-
-    process.env.NEXT_PUBLIC_APP_URL = 'http://localhost';
-    process.env.GOOGLE_CLIENT_ID = 'google-client-id';
-    process.env.GOOGLE_CLIENT_SECRET = 'google-client-secret';
-    process.env.MICROSOFT_CLIENT_ID = 'microsoft-client-id';
-    process.env.MICROSOFT_CLIENT_SECRET = 'microsoft-client-secret';
-
-    mockVerifyToken.mockResolvedValue({
-      userId: 'member-1',
-      organizationId: 'org-1',
-      role: 'member',
+  describe(`${provider} session-bound OAuth`, () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      process.env.NEXT_PUBLIC_APP_URL = 'http://localhost';
+      process.env.GOOGLE_CLIENT_ID = process.env.MICROSOFT_CLIENT_ID = 'synthetic-client';
+      process.env.GOOGLE_CLIENT_SECRET = process.env.MICROSOFT_CLIENT_SECRET = 'synthetic-secret';
+      (verifySessionToken as jest.Mock).mockReset().mockResolvedValue(auth);
+      (authorizeSession as jest.Mock).mockReset().mockResolvedValue(auth);
+      (authenticate as jest.Mock).mockResolvedValue(auth);
+      (prisma.emailAccount.findFirst as jest.Mock).mockReset().mockResolvedValue(null);
+      (prisma.emailAccount.count as jest.Mock).mockResolvedValue(0);
+      (prisma.emailAccount.update as jest.Mock).mockResolvedValue({ id: 'existing' });
+      (createOwnedAccount as jest.Mock).mockResolvedValue({ id: 'created' });
+      fetchMock.mockReset().mockImplementation(async (url: string) => url.includes('/token')
+        ? json({ access_token: 'synthetic-access', refresh_token: 'synthetic-refresh', expires_in: 3600 })
+        : json(identity));
     });
-    mockCount.mockResolvedValue(0);
-    mockEnqueueInitialSync.mockResolvedValue(undefined);
-  });
-
-  it('creates a new member-owned account, ignores state ownership, and queues sync only after persistence', async () => {
-    accountLookupMock(provider).mockResolvedValue(null);
-    mockSuccessfulFetches(provider, 'new-owner@example.com');
-
-    let createReachedResolve!: () => void;
-    const createReached = new Promise<void>((resolve) => {
-      createReachedResolve = resolve;
+    it('stores opaque 256-bit state for 600 seconds and exposes only S256 challenge', async () => {
+      const result = await init(new NextRequest(`http://localhost/api/accounts/oauth/${provider}/init?emailAddress=Inbox%40Example.com&label=Test`));
+      const url = new URL(result.headers.get('location')!);
+      const [key, raw, ex, ttl, nx] = store.set.mock.calls.at(-1);
+      const saved = JSON.parse(raw);
+      expect(url.searchParams.get('state')).toMatch(/^[\w-]{43}$/);
+      expect(key).toBe(`oauth:transaction:${url.searchParams.get('state')}`);
+      expect([ex, ttl, nx]).toEqual(['EX', 600, 'NX']);
+      expect(saved).toMatchObject({ sessionId: auth.sessionId, userId: auth.userId, organizationId: auth.organizationId, provider, emailAddress: 'inbox@example.com' });
+      expect(url.searchParams.get('code_challenge')).toBe(createHash('sha256').update(saved.verifier).digest('base64url'));
+      expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+      expect(url.toString()).not.toContain(saved.verifier);
+      expect(url.toString()).not.toContain('synthetic-secret');
     });
-    let resolveCreate!: (account: { id: string }) => void;
-
-    mockCreateOwnedAccount.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          createReachedResolve();
-          resolveCreate = resolve;
-        })
-    );
-
-    const responsePromise = provider.callback(
-      createRequest({
-        stateOverrides: {
-          emailAddress: 'new-owner@example.com',
-          label: 'New Owner Inbox',
-          ownerUserId: 'malicious-owner',
-        },
-      })
-    );
-
-    await createReached;
-
-    expect(accountLookupMock(provider)).toHaveBeenCalledWith(
-      accountLookupArgs(provider, 'new-owner@example.com')
-    );
-    expect(mockCreateOwnedAccount).toHaveBeenCalledWith(
-      'org-1',
-      'member-1',
-      expect.objectContaining({
-        label: 'New Owner Inbox',
-        emailAddress: 'new-owner@example.com',
-        provider: provider.emailProvider,
-        oauthProvider: provider.oauthProvider,
-        oauthAccessToken: `encrypted:${provider.name}-access-token`,
-        oauthRefreshToken: `encrypted:${provider.name}-refresh-token`,
-        passwordEncrypted: null,
-      })
-    );
-    expect(mockEnqueueInitialSync).not.toHaveBeenCalled();
-
-    resolveCreate({ id: 'account-new' });
-
-    const response = await responsePromise;
-    expect(response.headers.get('location')).toBe(
-      'http://localhost/settings/accounts?success=true&accountId=account-new&share=1'
-    );
-    expect(mockEnqueueInitialSync).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'account-new' })
-    );
-  });
-
-  it('allows the owner to reauthorize an existing account and redirects without share mode', async () => {
-    accountLookupMock(provider).mockResolvedValue({
-      id: 'account-existing',
-      organizationId: 'org-1',
-      emailAddress: 'shared@example.com',
-      ownerUserId: 'member-1',
-      oauthRefreshToken: 'encrypted:old-refresh-token',
-    });
-    mockUpdate.mockResolvedValue({ id: 'account-existing' });
-    mockSuccessfulFetches(provider);
-
-    const response = await provider.callback(createRequest());
-
-    expect(accountLookupMock(provider)).toHaveBeenCalledWith(
-      accountLookupArgs(provider, 'shared@example.com')
-    );
-    if (provider.name === 'google') {
-      expect(accountLookupMock(provider).mock.invocationCallOrder[0]).toBeLessThan(
-        fetchMock.mock.invocationCallOrder[0]
-      );
-    } else {
-      expect(fetchMock.mock.invocationCallOrder[0]).toBeLessThan(
-        accountLookupMock(provider).mock.invocationCallOrder[0]
-      );
-    }
-    expect(mockUpdate).toHaveBeenCalledWith({
-      where: { id: 'account-existing' },
-      data: expect.objectContaining({
-        oauthAccessToken: `encrypted:${provider.name}-access-token`,
-        oauthRefreshToken: `encrypted:${provider.name}-refresh-token`,
-        isActive: true,
-      }),
-    });
-    expect(mockCreateOwnedAccount).not.toHaveBeenCalled();
-    expect(mockEnqueueInitialSync).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'account-existing' })
-    );
-    expect(response.headers.get('location')).toBe(
-      'http://localhost/settings/accounts?success=true&accountId=account-existing'
-    );
-  });
-
-  it('allows an admin to reauthorize any same-organization existing account', async () => {
-    mockVerifyToken.mockResolvedValue({
-      userId: 'admin-1',
-      organizationId: 'org-1',
-      role: 'admin',
-    });
-    accountLookupMock(provider).mockResolvedValue({
-      id: 'account-existing',
-      organizationId: 'org-1',
-      emailAddress: 'shared@example.com',
-      ownerUserId: 'member-2',
-      oauthRefreshToken: 'encrypted:old-refresh-token',
-    });
-    mockUpdate.mockResolvedValue({ id: 'account-existing' });
-    mockSuccessfulFetches(provider);
-
-    const response = await provider.callback(createRequest());
-
-    expect(mockUpdate).toHaveBeenCalledWith({
-      where: { id: 'account-existing' },
-      data: expect.objectContaining({
-        oauthAccessToken: `encrypted:${provider.name}-access-token`,
-        oauthRefreshToken: `encrypted:${provider.name}-refresh-token`,
-        isActive: true,
-      }),
-    });
-    expect(mockEnqueueInitialSync).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'account-existing' })
-    );
-    expect(response.headers.get('location')).toBe(
-      'http://localhost/settings/accounts?success=true&accountId=account-existing'
-    );
-  });
-
-  it('rejects non-owner member reauthorization before exchanging tokens or queueing sync', async () => {
-    mockVerifyToken.mockResolvedValue({
-      userId: 'member-2',
-      organizationId: 'org-1',
-      role: 'member',
-    });
-    accountLookupMock(provider).mockResolvedValue({
-      id: 'account-existing',
-      organizationId: 'org-1',
-      emailAddress: 'shared@example.com',
-      ownerUserId: 'member-1',
-      oauthRefreshToken: 'encrypted:old-refresh-token',
-    });
-    mockSuccessfulFetches(provider);
-
-    const response = await provider.callback(createRequest());
-
-    expect(response.headers.get('location')).toBe(
-      'http://localhost/settings/accounts?error=unauthorized_reauthorization'
-    );
-    if (provider.name === 'google') {
-      expect(fetchMock).not.toHaveBeenCalled();
-    } else {
+    it('consumes once, sends verifier in POST body, and creates a session-user-owned account', async () => {
+      const t = await transaction();
+      const response = await callback(request(t.state));
+      expect(response.headers.get('location')).toContain('success=true');
+      const [, options] = fetchMock.mock.calls[0];
+      expect(options.body.get('code_verifier')).toMatch(/^[\w-]{43}$/);
+      expect(options.body.get('redirect_uri')).toBe(callbackUrl);
+      expect(createOwnedAccount).toHaveBeenCalledWith('org-1', 'user-1', expect.objectContaining({ emailAddress: 'inbox@example.com' }));
+      expect(store.eval).toHaveBeenCalledWith(CONSUME_TRANSACTION, 1, `oauth:transaction:${t.state}`, provider, 'session-1', 'user-1', 'org-1', callbackUrl);
+      expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state');
       expect(fetchMock).toHaveBeenCalledTimes(2);
-    }
-    expect(mockUpdate).not.toHaveBeenCalled();
-    expect(mockCreateOwnedAccount).not.toHaveBeenCalled();
-    expect(mockEnqueueInitialSync).not.toHaveBeenCalled();
-  });
-
-  if (provider.name === 'google') {
-    it('normalizes the requested mailbox before the pre-token reauthorization guard', async () => {
-      mockVerifyToken.mockResolvedValue({
-        userId: 'member-2',
-        organizationId: 'org-1',
-        role: 'member',
-      });
-      mockFindFirst.mockResolvedValue({
-        id: 'account-existing',
-        organizationId: 'org-1',
-        ownerUserId: 'member-1',
-        emailAddress: 'Owner@Example.com',
-        oauthRefreshToken: 'encrypted:old-refresh-token',
-      });
-
-      const response = await provider.callback(
-        createRequest({
-          stateOverrides: {
-            emailAddress: 'Owner@Example.com',
-          },
-        })
-      );
-
-      expect(mockFindFirst).toHaveBeenCalledWith(
-        accountLookupArgs(provider, 'owner@example.com')
-      );
-      expect(response.headers.get('location')).toBe(
-        'http://localhost/settings/accounts?error=unauthorized_reauthorization'
-      );
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(mockEncrypt).not.toHaveBeenCalled();
-      expect(mockUpdate).not.toHaveBeenCalled();
-      expect(mockCreateOwnedAccount).not.toHaveBeenCalled();
-      expect(mockEnqueueInitialSync).not.toHaveBeenCalled();
     });
-
-    it('rejects callbacks without a provider-confirmed Google mailbox before credential storage', async () => {
-      mockFindFirst.mockResolvedValue(null);
-      mockSuccessfulFetches(provider, 'unused@example.com', {});
-
-      const response = await provider.callback(createRequest());
-
-      expect(response.headers.get('location')).toBe(
-        'http://localhost/settings/accounts?error=provider_identity_unconfirmed'
-      );
-      expect(mockEncrypt).not.toHaveBeenCalled();
-      expect(mockUpdate).not.toHaveBeenCalled();
-      expect(mockCreateOwnedAccount).not.toHaveBeenCalled();
-      expect(mockCount).not.toHaveBeenCalled();
-      expect(mockEnqueueInitialSync).not.toHaveBeenCalled();
-    });
-
-    it('rejects reauthorization when provider-confirmed email resolves to another users existing account', async () => {
-      mockVerifyToken.mockResolvedValue({
-        userId: 'member-2',
-        organizationId: 'org-1',
-        role: 'member',
-      });
-      mockFindFirst
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({
-          id: 'account-provider-email',
-          organizationId: 'org-1',
-          ownerUserId: 'member-1',
-          emailAddress: 'provider-owned@example.com',
-          oauthRefreshToken: 'encrypted:old-refresh-token',
-        });
-      mockSuccessfulFetches(provider, 'provider-owned@example.com');
-
-      const response = await provider.callback(
-        createRequest({
-          stateOverrides: {
-            emailAddress: 'state-email@example.com',
-          },
-        })
-      );
-
-      expect(mockFindFirst).toHaveBeenNthCalledWith(1, {
-        where: {
-          organizationId: 'org-1',
-          emailAddress: { equals: 'state-email@example.com', mode: 'insensitive' },
-        },
-      });
-      expect(mockFindFirst).toHaveBeenNthCalledWith(2, {
-        where: {
-          organizationId: 'org-1',
-          emailAddress: { equals: 'provider-owned@example.com', mode: 'insensitive' },
-        },
-      });
+    it('accepts only one concurrent callback', async () => {
+      const t = await transaction();
+      const results = await Promise.all([callback(request(t.state)), callback(request(t.state))]);
+      expect(results.filter(r => r.headers.get('location')?.includes('success=true'))).toHaveLength(1);
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(response.headers.get('location')).toBe(
-        'http://localhost/settings/accounts?error=unauthorized_reauthorization'
-      );
-      expect(mockEncrypt).not.toHaveBeenCalled();
-      expect(mockUpdate).not.toHaveBeenCalled();
-      expect(mockCreateOwnedAccount).not.toHaveBeenCalled();
-      expect(mockCount).not.toHaveBeenCalled();
-      expect(mockEnqueueInitialSync).not.toHaveBeenCalled();
     });
-
-    it('rejects mixed-case provider-confirmed mailbox reauthorization before credential storage', async () => {
-      mockVerifyToken.mockResolvedValue({
-        userId: 'member-2',
-        organizationId: 'org-1',
-        role: 'member',
-      });
-      mockFindFirst
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({
-          id: 'account-provider-email',
-          organizationId: 'org-1',
-          ownerUserId: 'member-1',
-          emailAddress: 'Provider-Owned@Example.COM',
-          oauthRefreshToken: 'encrypted:old-refresh-token',
-        });
-      mockSuccessfulFetches(provider, 'unused@example.com', {
-        email: 'Provider-Owned@Example.COM',
-      });
-
-      const response = await provider.callback(
-        createRequest({
-          stateOverrides: {
-            emailAddress: 'state-email@example.com',
-          },
-        })
-      );
-
-      expect(mockFindFirst).toHaveBeenNthCalledWith(1, {
-        where: {
-          organizationId: 'org-1',
-          emailAddress: { equals: 'state-email@example.com', mode: 'insensitive' },
-        },
-      });
-      expect(mockFindFirst).toHaveBeenNthCalledWith(2, {
-        where: {
-          organizationId: 'org-1',
-          emailAddress: { equals: 'provider-owned@example.com', mode: 'insensitive' },
-        },
-      });
-      expect(response.headers.get('location')).toBe(
-        'http://localhost/settings/accounts?error=unauthorized_reauthorization'
-      );
-      expect(mockEncrypt).not.toHaveBeenCalled();
-      expect(mockUpdate).not.toHaveBeenCalled();
-      expect(mockCreateOwnedAccount).not.toHaveBeenCalled();
-      expect(mockCount).not.toHaveBeenCalled();
-      expect(mockEnqueueInitialSync).not.toHaveBeenCalled();
+    it.each([undefined, 'forged', 'a'.repeat(43)])('rejects missing/forged state %s', async state => {
+      expect((await callback(request(state))).headers.get('location')).toContain('invalid_state');
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
     });
-  }
-
-  if (provider.name === 'microsoft') {
-    it('uses the provider-confirmed normalized Graph mailbox for lookup and creation', async () => {
-      accountLookupMock(provider).mockResolvedValue(null);
-      mockCreateOwnedAccount.mockResolvedValue({ id: 'account-new' });
-      mockSuccessfulFetches(provider, 'unused@example.com', {
-        mail: null,
-        userPrincipalName: 'Provider-Owned@Example.COM',
-      });
-
-      const response = await provider.callback(
-        createRequest({
-          stateOverrides: {
-            emailAddress: 'state-email@example.com',
-          },
-        })
-      );
-
-      expect(accountLookupMock(provider)).toHaveBeenCalledWith(
-        accountLookupArgs(provider, 'provider-owned@example.com')
-      );
-      expect(fetchMock).toHaveBeenNthCalledWith(2, provider.identityUrl, {
-        method: 'GET',
-        headers: { Authorization: 'Bearer microsoft-access-token' },
-      });
-      expect(mockCreateOwnedAccount).toHaveBeenCalledWith(
-        'org-1',
-        'member-1',
-        expect.objectContaining({
-          emailAddress: 'provider-owned@example.com',
-        })
-      );
-      expect(response.headers.get('location')).toBe(
-        'http://localhost/settings/accounts?success=true&accountId=account-new&share=1'
-      );
+    it('rejects expired state', async () => {
+      const t = await transaction();
+      const now = Date.now();
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(now + 601000);
+      try { expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state'); }
+      finally { clock.mockRestore(); }
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
     });
-
-    it('rejects mixed-case existing mailbox reauthorization before credential storage', async () => {
-      mockVerifyToken.mockResolvedValue({
-        userId: 'member-2',
-        organizationId: 'org-1',
-        role: 'member',
-      });
-      accountLookupMock(provider).mockResolvedValue({
-        id: 'account-provider-email',
-        organizationId: 'org-1',
-        ownerUserId: 'member-1',
-        emailAddress: 'Provider-Owned@Example.COM',
-        oauthRefreshToken: 'encrypted:old-refresh-token',
-      });
-      mockSuccessfulFetches(provider, 'provider-owned@example.com');
-
-      const response = await provider.callback(
-        createRequest({
-          stateOverrides: {
-            emailAddress: 'state-email@example.com',
-          },
-        })
-      );
-
-      expect(accountLookupMock(provider)).toHaveBeenCalledWith(
-        accountLookupArgs(provider, 'provider-owned@example.com')
-      );
-      expect(response.headers.get('location')).toBe(
-        'http://localhost/settings/accounts?error=unauthorized_reauthorization'
-      );
-      expect(mockEncrypt).not.toHaveBeenCalled();
-      expect(mockUpdate).not.toHaveBeenCalled();
-      expect(mockCreateOwnedAccount).not.toHaveBeenCalled();
-      expect(mockCount).not.toHaveBeenCalled();
-      expect(mockEnqueueInitialSync).not.toHaveBeenCalled();
+    it.each(['sessionId', 'userId', 'organizationId'])('rejects wrong %s without consuming the legitimate transaction', async field => {
+      const t = await transaction();
+      (verifySessionToken as jest.Mock).mockResolvedValueOnce({ ...auth, [field]: 'other' });
+      expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state');
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
+      expect((await callback(request(t.state))).headers.get('location')).toContain('success=true');
     });
-
-    it('rejects callbacks without a confirmed Graph mailbox before any account lookup or storage', async () => {
-      accountLookupMock(provider).mockResolvedValue(null);
-      mockSuccessfulFetches(provider, 'unused@example.com', {
-        mail: null,
-        userPrincipalName: null,
-      });
-
-      const response = await provider.callback(createRequest());
-
-      expect(response.headers.get('location')).toBe(
-        'http://localhost/settings/accounts?error=provider_identity_unconfirmed'
-      );
-      expect(accountLookupMock(provider)).not.toHaveBeenCalled();
-      expect(mockEncrypt).not.toHaveBeenCalled();
-      expect(mockUpdate).not.toHaveBeenCalled();
-      expect(mockCreateOwnedAccount).not.toHaveBeenCalled();
-      expect(mockEnqueueInitialSync).not.toHaveBeenCalled();
+    it('rejects the wrong provider', async () => {
+      const t = await createOAuthTransaction(provider === 'google' ? 'microsoft' : 'google', auth, 'inbox@example.com', 'Test');
+      expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state');
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
     });
-  }
+    it('consumes provider rejection and requires a restart', async () => {
+      const t = await transaction();
+      expect((await callback(request(t.state, 'error=access_denied'))).headers.get('location')).toContain('oauth_rejected');
+      expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state');
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
+    });
+    it('consumes a callback missing its code', async () => {
+      const t = await transaction();
+      expect((await callback(request(t.state, ''))).headers.get('location')).toContain('missing_oauth_params');
+      expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state'); noMutation();
+    });
+    it('accepts standalone adapter URLs while ignoring forwarded origins', async () => {
+      process.env.NEXT_PUBLIC_APP_URL = 'https://mail.example.com';
+      const t = await transaction();
+      // attachRequestMeta supplies the standalone listening address as initURL;
+      // fromNodeNextRequest preserves that origin for the route request.
+      const req = request(t.state, 'code=test', 'https://0.0.0.0:3000');
+      req.headers.set('host', 'attacker.example');
+      req.headers.set('x-forwarded-host', 'attacker.example');
+      req.headers.set('x-forwarded-proto', 'http');
+      req.headers.set('forwarded', 'host=attacker.example;proto=http');
+      const response = await callback(req);
+      expect(response.headers.get('location')).toBe('https://mail.example.com/settings/accounts?success=true&accountId=created&share=1');
+      const redirectUri = `https://mail.example.com/api/accounts/oauth/${provider}/callback`;
+      expect(fetchMock.mock.calls[0][1].body.get('redirect_uri')).toBe(redirectUri);
+      expect(store.eval).toHaveBeenCalledWith(CONSUME_TRANSACTION, 1, `oauth:transaction:${t.state}`, provider, 'session-1', 'user-1', 'org-1', redirectUri);
+      expect((await callback(req)).headers.get('location')).toContain('invalid_state');
+    });
+    it('rejects a changed configured public origin through transaction binding', async () => {
+      const t = await transaction();
+      process.env.NEXT_PUBLIC_APP_URL = 'https://mail.example.com';
+      expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state');
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
+    });
+    it.each(['before', 'after'])('rejects revoked sessions %s provider exchange', async when => {
+      const t = await transaction();
+      const verifier = when === 'before' ? verifySessionToken : authorizeSession;
+      (verifier as jest.Mock).mockRejectedValueOnce(new SessionError());
+      expect((await callback(request(t.state))).headers.get('location')).toContain('auth_required'); noMutation();
+    });
+    it.each([{}, provider === 'google' ? { email: 'other@example.com' } : { mail: 'other@example.com' }])('rejects missing or mismatched provider identity %j', async profile => {
+      const t = await transaction();
+      fetchMock.mockResolvedValueOnce(json({ access_token: 'synthetic', expires_in: 3600 })).mockResolvedValueOnce(json(profile));
+      expect((await callback(request(t.state))).headers.get('location')).toMatch(/provider_identity_(unconfirmed|mismatch)/); noMutation();
+    });
+    it.each(['http', 'network', 'json'])('consumes state on token endpoint %s error without exposing provider details', async kind => {
+      const t = await transaction();
+      if (kind === 'http') fetchMock.mockResolvedValueOnce(json({ error_description: 'private-provider-evidence' }, 400));
+      if (kind === 'network') fetchMock.mockRejectedValueOnce(new Error('private-provider-evidence'));
+      if (kind === 'json') fetchMock.mockResolvedValueOnce(new Response('invalid json'));
+      const response = await callback(request(t.state));
+      expect(response.headers.get('location')).not.toContain('private-provider-evidence');
+      expect((await callback(request(t.state))).headers.get('location')).toContain('invalid_state'); noMutation();
+    });
+    it('uses current membership after an admin is demoted during provider calls', async () => {
+      const t = await transaction();
+      (verifySessionToken as jest.Mock).mockResolvedValue({ ...auth, role: 'admin' });
+      (authorizeSession as jest.Mock).mockResolvedValue({ ...auth, role: 'member' });
+      (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValue({ id: 'existing', emailAddress: 'inbox@example.com', ownerUserId: 'another-user' });
+      expect((await callback(request(t.state))).headers.get('location')).toContain('unauthorized_reauthorization'); noMutation();
+    });
+    it('requires the browser session cookie at callback', async () => {
+      const t = await transaction();
+      const req = new NextRequest(`${callbackUrl}?code=test&state=${t.state}`);
+      expect((await callback(req)).headers.get('location')).toContain('auth_required');
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
+    });
+    it('does not use the request origin when application origin is missing', async () => {
+      delete process.env.NEXT_PUBLIC_APP_URL;
+      expect((await callback(request('a'.repeat(43)))).status).toBe(503);
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
+    });
+    if (provider === 'microsoft') it('accepts the matching normalized Graph userPrincipalName when mail is absent', async () => {
+      const t = await transaction();
+      fetchMock.mockResolvedValueOnce(json({ access_token: 'synthetic', expires_in: 3600 }))
+        .mockResolvedValueOnce(json({ mail: null, userPrincipalName: 'Inbox@Example.COM' }));
+      expect((await callback(request(t.state))).headers.get('location')).toContain('success=true');
+      expect(createOwnedAccount).toHaveBeenCalledWith('org-1', 'user-1', expect.objectContaining({ emailAddress: 'inbox@example.com' }));
+    });
+    if (provider === 'google') it('requires a verified Google mailbox', async () => {
+      const t = await transaction();
+      fetchMock.mockResolvedValueOnce(json({ access_token: 'synthetic', expires_in: 3600 }))
+        .mockResolvedValueOnce(json({ email: 'inbox@example.com', verified_email: false }));
+      expect((await callback(request(t.state))).headers.get('location')).toContain('provider_identity_unconfirmed'); noMutation();
+    });
+    it('fails closed on Redis read failure', async () => {
+      const t = await transaction();
+      store.eval.mockRejectedValueOnce(new Error('Redis unavailable'));
+      expect((await callback(request(t.state))).headers.get('location')).toContain('internal_error');
+      expect(fetchMock).not.toHaveBeenCalled(); noMutation();
+    });
+    it('returns 503 on Redis write failure without redirecting to provider', async () => {
+      store.set.mockRejectedValueOnce(new Error('Redis unavailable'));
+      const response = await init(new NextRequest(`http://localhost/api/accounts/oauth/${provider}/init?emailAddress=inbox%40example.com&label=Test`));
+      expect(response.status).toBe(503); expect(response.headers.get('location')).toBeNull();
+    });
+    it('preserves an existing refresh token when the provider omits a replacement', async () => {
+      const t = await transaction();
+      (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValue({ id: 'existing', emailAddress: 'Inbox@Example.com', ownerUserId: 'user-1', oauthRefreshToken: 'encrypted:old' });
+      fetchMock.mockResolvedValueOnce(json({ access_token: 'new', expires_in: 3600 }));
+      expect((await callback(request(t.state))).headers.get('location')).toContain('success=true');
+      expect(prisma.emailAccount.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ oauthRefreshToken: 'encrypted:old' }) }));
+      expect(createOwnedAccount).not.toHaveBeenCalled();
+    });
+    it.each(['member', 'admin'])('enforces current %s ownership permissions', async role => {
+      const t = await transaction();
+      (verifySessionToken as jest.Mock).mockResolvedValue({ ...auth, role });
+      (authorizeSession as jest.Mock).mockResolvedValue({ ...auth, role });
+      (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValue({ id: 'existing', emailAddress: 'inbox@example.com', ownerUserId: 'another-user' });
+      const result = await callback(request(t.state));
+      expect(result.headers.get('location')).toContain(role === 'admin' ? 'success=true' : 'unauthorized_reauthorization');
+      if (role === 'member') noMutation();
+    });
+  });
+}
+
+it.each(['', 'https://example.com/path', 'https://user:password@example.com', 'http://example.com', 'https://example.com?query=1'])('rejects invalid configured callback origin %s', value => {
+  process.env.NEXT_PUBLIC_APP_URL = value;
+  expect(() => trustedOrigin()).toThrow();
 });
