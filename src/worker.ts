@@ -72,7 +72,11 @@ async function bootstrap() {
   // After initializing connections, enqueue initial sync for each account
   const { enqueueInitialSync } = await import('@/lib/queue/client');
   for (const account of accounts) {
-    await enqueueInitialSync(account);
+    try {
+      await enqueueInitialSync(account);
+    } catch (error) {
+      console.error(`Initial sync admission deferred for account ${account.id}:`, error);
+    }
   }
 
   // 3. Setup heartbeat mechanism

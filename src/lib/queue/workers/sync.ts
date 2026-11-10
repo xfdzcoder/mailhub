@@ -1,3 +1,4 @@
+import { processAdmitted } from '@/lib/workload/processor';
 import { Worker, Job } from 'bullmq';
 import Redis from 'ioredis';
 import { redis as pubsubRedis } from '@/lib/redis';
@@ -138,10 +139,10 @@ async function processSyncJob(
 const createSyncWorker = (queueName: string, workerPartition: string, isLegacyQueue = false) =>
   new Worker<SyncJobPayload>(
     queueName,
-    (job) => processSyncJob(job, isLegacyQueue, workerPartition),
+    (job) => processAdmitted(job, () => processSyncJob(job, isLegacyQueue, workerPartition)),
     {
       connection: workerRedis as any,
-      concurrency: runtimeConfig.syncWorkerConcurrency,
+      concurrency: Math.max(2, runtimeConfig.syncWorkerConcurrency),
     }
   );
 

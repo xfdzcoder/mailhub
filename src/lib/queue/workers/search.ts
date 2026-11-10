@@ -1,3 +1,4 @@
+import { processAdmitted } from '@/lib/workload/processor';
 import { Worker, Job } from 'bullmq';
 import Redis from 'ioredis';
 import { meilisearch } from '@/lib/search/meilisearch';
@@ -19,7 +20,7 @@ export interface SearchIndexPayload {
 
 export const searchWorker = new Worker<SearchIndexPayload>(
   'search-index',
-  async (job: Job<SearchIndexPayload>) => {
+  async (job: Job<SearchIndexPayload>) => processAdmitted(job, async () => {
     const { emailId } = job.data;
     
     // Fetch email details
@@ -61,7 +62,7 @@ export const searchWorker = new Worker<SearchIndexPayload>(
     await meilisearch.index('emails').addDocuments([document], { primaryKey: 'id' });
     
     console.log(`Indexed email ${emailId} in Meilisearch.`);
-  },
+  }),
   {
     connection: workerRedis as any,
     concurrency: 15, // Allow up to 15 parallel indexing jobs

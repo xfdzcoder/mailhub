@@ -1,3 +1,4 @@
+import { processAdmitted } from '@/lib/workload/processor';
 import { Worker, Job } from 'bullmq';
 import Redis from 'ioredis';
 import { prisma } from '@/lib/db/prisma';
@@ -33,7 +34,12 @@ export interface SummaryJobPayload {
 }
 
 export async function executeSummaryRun(payload: SummaryJobPayload): Promise<void> {
-  const { summaryRunId, organizationId, labelId, webhookIds, timeRangeHours, limit = 25 } = payload;
+  const run = await prisma.emailSummaryRun.findUnique({ where: { id: payload.summaryRunId } });
+  if (!run) return;
+  const { id: summaryRunId, organizationId, labelId } = run;
+  const webhookIds = payload.webhookIds?.slice(0, 20);
+  const limit = Math.min(100, Math.max(1, Number(payload.limit) || 25));
+  const timeRangeHours = Math.min(720, Math.max(1, Number(payload.timeRangeHours) || 24));
 
   // Atomically claim the job by transitioning status from QUEUED -> SUMMARIZING
   const claimResult = await prisma.emailSummaryRun.updateMany({
@@ -406,7 +412,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
 export const summaryWorker = new Worker<SummaryJobPayload>(
   'email-summary',
   async (job: Job<SummaryJobPayload>) => {
-    await executeSummaryRun(job.data);
+    await processAdmitted(job, () => executeSummaryRun(job.data));
   },
   {
     connection: workerRedis as any,

@@ -1,3 +1,6 @@
+jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run() }));
+jest.mock('@/lib/workload/ownership', () => ({ accountWorkOwner: async () => ({ userId: 'u', organizationId: 'o' }) }));
+jest.mock('@/lib/workload/send-once', () => ({ claimSend: async () => true }));
 import {
   evaluateCriterion,
   evaluateRule,

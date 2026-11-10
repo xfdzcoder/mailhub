@@ -1,3 +1,5 @@
+import { withWork } from '@/lib/workload/admission';
+import { accountWorkOwner } from '@/lib/workload/ownership';
 import { ImapFlow, FetchMessageObject } from 'imapflow';
 import { prisma } from '@/lib/db/prisma';
 import { decrypt, encrypt } from '@/lib/crypto';
@@ -751,7 +753,7 @@ export class IMAPConnectionManager {
     folder: string = 'INBOX',
     skipNotifications: boolean = false
   ): Promise<SyncResult> {
-    return this.queueAccountMailboxOperation(accountId, () =>
+    return withWork(await accountWorkOwner(accountId), () => this.queueAccountMailboxOperation(accountId, () =>
       this.fetchNewEmailsForAccount(
         accountId,
         startSeqOrUid,
@@ -759,7 +761,7 @@ export class IMAPConnectionManager {
         folder,
         skipNotifications
       )
-    );
+    ));
   }
 
   /** Mark the current connection unavailable and schedule one reconnect attempt. */
@@ -804,9 +806,9 @@ export class IMAPConnectionManager {
 
     entry.reconciliationInFlight = true;
     try {
-      await this.queueAccountMailboxOperation(accountId, () =>
+      await withWork(await accountWorkOwner(accountId), () => this.queueAccountMailboxOperation(accountId, () =>
         this.reconcileMailboxesForAccount(accountId, entry)
-      );
+      ));
     } finally {
       if (this.connections.get(accountId) === entry) {
         entry.reconciliationInFlight = false;

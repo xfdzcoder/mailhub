@@ -1,3 +1,5 @@
+jest.mock('@/lib/workload/admission', () => ({ reserve: jest.fn().mockResolvedValue({}), AdmissionError: class extends Error {} }));
+jest.mock('@/lib/workload/queue', () => ({ reservationId: (q: string, id: string) => `${q}:${id}` }));
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
   requireAdmin: jest.fn(),
@@ -20,6 +22,7 @@ jest.mock('@/lib/db/prisma', () => ({
       findUnique: jest.fn(),
     },
     emailSummaryRun: {
+      findUnique: jest.fn(),
       create: jest.fn(),
     },
   },

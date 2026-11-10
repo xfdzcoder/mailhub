@@ -1,3 +1,4 @@
+jest.mock('@/lib/workload/processor', () => ({ processAdmitted: async (_job: unknown, run: () => Promise<unknown>) => run() }));
 jest.mock('ioredis', () =>
   jest.fn().mockImplementation(() => ({
     on: jest.fn(),

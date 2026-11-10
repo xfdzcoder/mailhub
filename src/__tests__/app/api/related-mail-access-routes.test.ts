@@ -1,3 +1,4 @@
+jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(), AdmissionError: class extends Error {} }));
 // Endpoint fixtures isolate Redis; distributed policy is exercised separately.
 jest.mock('ioredis', () => class {
   on() { return this; }
