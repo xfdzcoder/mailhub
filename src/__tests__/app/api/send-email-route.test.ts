@@ -69,10 +69,12 @@ function createRequest(
           sizeBytes?: number;
         }>
       | undefined;
-  }> = {}
+  }> = {},
+  signal?: AbortSignal,
 ): NextRequest {
   return new Request('http://localhost/api/accounts/account-1/emails/send', {
     method: 'POST',
+    signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       to: ['recipient@example.com'],
@@ -103,6 +105,19 @@ describe('POST sent email', () => {
     mockLogActivity.mockResolvedValue(undefined);
     mockMkdir.mockResolvedValue(undefined);
     mockWriteFile.mockResolvedValue(undefined);
+  });
+
+  it('cleans staged files and skips delivery when the request aborts during a write', async () => {
+    const abort = new AbortController();
+    mockWriteFile.mockImplementationOnce(async () => { abort.abort(); });
+    const request = createRequest({
+      attachments: [{ filename: 'fixture.txt', contentType: 'text/plain', content: 'YWJj' }],
+    }, abort.signal);
+    const response = await POST(request, { params: Promise.resolve({ id: 'account-1' }) });
+    expect(response.status).toBe(400);
+    expect(fs.unlink).toHaveBeenCalledWith(mockWriteFile.mock.calls[0][0]);
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it('stores one provider-confirmed time as sentAt and receivedAt', async () => {

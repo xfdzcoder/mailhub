@@ -122,9 +122,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           logger: false,
         });
 
-        await client.connect();
-        await client.append('Drafts', rawBuffer, ['\\Draft']);
-        await client.logout();
+        try {
+          await client.connect();
+          await client.append('Drafts', rawBuffer, ['\\Draft']);
+          await client.logout();
+        } finally {
+          client.close();
+        }
       }
     }
 

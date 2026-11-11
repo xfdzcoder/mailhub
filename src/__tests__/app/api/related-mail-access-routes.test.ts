@@ -80,6 +80,8 @@ import { getAccountStats, getDecryptedAccount } from '@/lib/accounts/service';
 import { searchQueue } from '@/lib/queue/client';
 import { getValidAccessToken, syncDraftRaw } from '@/lib/gmail/api';
 import { ImapFlow } from 'imapflow';
+import * as crypto from '@/lib/crypto';
+import * as outboundHost from '@/lib/network/outbound-host';
 import { createTransport } from 'nodemailer';
 
 const memberWhere = {
@@ -239,6 +241,37 @@ describe('related mail route account access', () => {
       'access-token',
       Buffer.from('mime-message')
     );
+  });
+
+  it('closes the IMAP connection if uploading a draft fails', async () => {
+    const resolveHost = jest.spyOn(outboundHost, 'resolveSafeOutboundHost')
+      .mockResolvedValue({ address: '192.0.2.10' });
+    const decrypt = jest.spyOn(crypto, 'decrypt').mockReturnValue('fixture');
+    const client = {
+      connect: jest.fn().mockResolvedValue(undefined),
+      append: jest.fn().mockRejectedValue(new Error('Synthetic append failure')),
+      logout: jest.fn(),
+      close: jest.fn(),
+    };
+    (ImapFlow as unknown as jest.Mock).mockImplementationOnce(() => client);
+    (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValueOnce({
+      id: 'account-1', provider: 'imap', imapHost: 'mail.example.test',
+      passwordEncrypted: 'fixture', emailAddress: 'sender@example.test',
+    });
+    (prisma.email.findFirst as jest.Mock).mockResolvedValueOnce({
+      id: 'draft-1', isDraft: true, subject: 'Draft', attachments: [],
+    });
+    try {
+      const response = await syncDraft(new Request('http://localhost', {
+        method: 'POST', body: JSON.stringify({ draftId: 'draft-1' }),
+      }) as NextRequest, { params: Promise.resolve({ id: 'account-1' }) });
+      expect(await response.json()).toEqual({ success: true, warning: 'Failed to sync to IMAP' });
+      expect(client.append).toHaveBeenCalledTimes(1);
+      expect(client.close).toHaveBeenCalledTimes(1);
+    } finally {
+      resolveHost.mockRestore();
+      decrypt.mockRestore();
+    }
   });
 
   it('rejects oversized historical draft files without uploading or deleting them', async () => {

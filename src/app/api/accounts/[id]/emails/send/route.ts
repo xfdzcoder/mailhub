@@ -46,7 +46,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   let deliveredMessageId: string | undefined;
   let published = false;
   try {
-    staged = await stageOutgoingFiles(parsed.data.attachments || []);
+    staged = await stageOutgoingFiles(parsed.data.attachments || [], req.signal);
+    if (req.signal.aborted) throw new OutgoingInputError('Request aborted', 400);
     const { messageId } = await sendEmail(accountId, parsed.data);
     deliveredMessageId = messageId;
     const sentAt = new Date();

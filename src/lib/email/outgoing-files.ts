@@ -4,7 +4,14 @@ import path from 'path';
 import { outgoingLimits, OutgoingInputError, validateOutgoingMail } from './outgoing-budget';
 
 /** Stage new, server-named files; callers publish metadata transactionally. */
-export async function stageOutgoingFiles(attachments: { filename: string; contentType: string; content: string }[]) {
+export async function stageOutgoingFiles(
+  attachments: { filename: string; contentType: string; content: string }[],
+  signal?: AbortSignal,
+) {
+  const checkAborted = () => {
+    if (signal?.aborted) throw new OutgoingInputError('Request aborted', 400);
+  };
+  checkAborted();
   validateOutgoingMail({ attachments });
   const files: { id: string; filename: string; contentType: string; sizeBytes: number; storagePath: string }[] = [];
   const cleanup = async () => {
@@ -13,6 +20,7 @@ export async function stageOutgoingFiles(attachments: { filename: string; conten
   try {
     if (attachments.length) await mkdir(path.join(process.cwd(), '.storage', 'attachments'), { recursive: true });
     for (const att of attachments) {
+      checkAborted();
       const id = randomUUID();
       const storagePath = path.join(process.cwd(), '.storage', 'attachments', id);
       const buffer = Buffer.from(att.content, 'base64');
@@ -25,6 +33,7 @@ export async function stageOutgoingFiles(attachments: { filename: string; conten
         throw error;
       }
     }
+    checkAborted();
     return { files, cleanup };
   } catch (error) {
     await cleanup();

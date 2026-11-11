@@ -57,7 +57,9 @@ including submitted content. Server-generated filenames prevent client attachmen
 IDs from becoming paths or overwriting existing files.
 
 Files are staged sequentially before sending or saving. Failed staging removes
-new files, including partially written files. Draft and Sent metadata publication
+new files, including partially written files. A request aborted during staging
+cleans up its staged files before delivery or database publication. Failed IMAP
+draft uploads close the provider connection. Draft and Sent metadata publication
 uses a database transaction, and failure removes staged files. A draft with omitted
 attachments preserves them; an explicit empty list clears metadata. Stored draft
 sync files are read sequentially through bounded file handles with guaranteed

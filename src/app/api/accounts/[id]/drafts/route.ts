@@ -68,7 +68,8 @@ export async function PUT(req: NextRequest, { params }: RouteParams) {
 
   let staged: Awaited<ReturnType<typeof stageOutgoingFiles>> | undefined;
   try {
-    staged = await stageOutgoingFiles(data.attachments || []);
+    staged = await stageOutgoingFiles(data.attachments || [], req.signal);
+    if (req.signal.aborted) throw new OutgoingInputError('Request aborted', 400);
     const replacedPaths: string[] = [];
     const draftId = await prisma.$transaction(async (tx) => {
       let emailId = data.draftId;
