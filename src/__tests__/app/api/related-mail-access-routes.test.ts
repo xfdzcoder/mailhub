@@ -245,7 +245,7 @@ describe('related mail route account access', () => {
 
   it('closes the IMAP connection if uploading a draft fails', async () => {
     const resolveHost = jest.spyOn(outboundHost, 'resolveSafeOutboundHost')
-      .mockResolvedValue({ address: '192.0.2.10' });
+      .mockResolvedValue({ address: '192.0.2.10', family: 4, servername: 'mail.example.test' });
     const decrypt = jest.spyOn(crypto, 'decrypt').mockReturnValue('fixture');
     const client = {
       connect: jest.fn().mockResolvedValue(undefined),
