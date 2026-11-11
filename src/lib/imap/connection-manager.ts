@@ -1,3 +1,4 @@
+import { readImapIncoming, IMAP_RESPONSE_LIMITS, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import { ImapFlow, FetchMessageObject } from 'imapflow';
 import { prisma } from '@/lib/db/prisma';
 import { decrypt, encrypt } from '@/lib/crypto';
@@ -149,6 +150,7 @@ export async function withImapConnection<T>(
   try {
     const destination = await resolveSafeOutboundHost(account.imapHost);
     client = new ImapFlow({
+      ...IMAP_RESPONSE_LIMITS,
       host: destination.address,
       port: account.imapPort || 993,
       secure: account.imapSecure ?? true,
@@ -584,6 +586,7 @@ export class IMAPConnectionManager {
     }
 
     const client = new ImapFlow({
+      ...IMAP_RESPONSE_LIMITS,
       host: destination.address,
       port: account.imapPort || 993,
       secure: account.imapSecure ?? true,
@@ -956,7 +959,7 @@ export class IMAPConnectionManager {
         accountId,
         missingUids.length > 0 ? missingUids.join(',') : range,
         {
-          source: true,
+
           uid: true,
           bodyStructure: true,
           internalDate: true,
@@ -1022,7 +1025,8 @@ export class IMAPConnectionManager {
     skipNotifications: boolean = false
   ): Promise<boolean> {
     try {
-      const rawSource = message.source;
+      const download = await readImapIncoming(this.connections.get(accountId)!.client, String(message.uid), undefined, INCOMING_LIMITS.raw);
+      const rawSource = download?.content;
       if (!rawSource) return false;
       const parsed = await parseEmail(rawSource);
       const receivedAt = resolveImapReceivedAt(message.internalDate, parsed.receivedAt);

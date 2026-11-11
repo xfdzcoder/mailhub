@@ -80,7 +80,7 @@ describe('IMAP persistence concurrency', () => {
     const manager = new IMAPConnectionManager();
     const client = {
       fetch: jest.fn(async function* (_range: string, options: { source?: boolean }) {
-        if (options.source) {
+        if ('bodyStructure' in options) {
           yield { uid: 2, source: Buffer.from('raw message') };
           return;
         }
@@ -116,7 +116,6 @@ describe('IMAP persistence concurrency', () => {
     });
     expect(client.fetch.mock.calls[1][0]).toBe('2');
     expect(client.fetch.mock.calls[1][1]).toEqual({
-      source: true,
       uid: true,
       bodyStructure: true,
       internalDate: true,

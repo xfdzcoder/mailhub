@@ -1,3 +1,4 @@
+import { incomingJson, IncomingBudgetError, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import { validateRawOutgoing } from '@/lib/email/outgoing-budget';
 import { decrypt, encrypt } from '@/lib/crypto';
 import { prisma } from '@/lib/db/prisma';
@@ -16,13 +17,16 @@ export class GmailApiError extends Error {
  * Enhanced fetch wrapper for Google APIs that implements
  * truncated exponential backoff for handling 429 and 5xx errors.
  */
+const quotaBodies = new WeakMap<Response, ReturnType<typeof JSON.parse>>();
+
 export async function gmailFetch(url: string | URL, options?: RequestInit, maxRetries = 5): Promise<Response> {
   return withGmailRateLimit(getGmailRequestKey(options), async () => {
     let retries = 0;
     const maxBackoff = 32000;
 
     while (true) {
-      const res = await fetch(url.toString(), options);
+      const timeout = AbortSignal.timeout(INCOMING_LIMITS.timeoutMs);
+      const res = await fetch(url.toString(), { ...options, signal: options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout });
       const quotaError = await isQuotaErrorResponse(res);
 
       // Gmail can report user/project rate limits as 403 as well as 429.
@@ -36,7 +40,7 @@ export async function gmailFetch(url: string | URL, options?: RequestInit, maxRe
           maxBackoff
         );
 
-        await res.text().catch(() => null);
+        await res.body?.cancel().catch(() => {});
         console.warn(
           `[Gmail API] Retryable response (${res.status}). Retrying in ${backoffMs}ms... ` +
             `(Attempt ${retries + 1} of ${maxRetries})`
@@ -53,18 +57,23 @@ export async function gmailFetch(url: string | URL, options?: RequestInit, maxRe
 async function isQuotaErrorResponse(response: Response): Promise<boolean> {
   if (response.status !== 403) return false;
 
-  const body = await response.clone().json().catch(() => null) as {
+  const body = await incomingJson(response) as {
     error?: {
       message?: string;
       errors?: Array<{ reason?: string; message?: string }>;
     };
   } | null;
 
+  quotaBodies.set(response, body);
   const message = body?.error?.message ?? '';
   const reasons = body?.error?.errors
     ?.map((error) => `${error.reason ?? ''} ${error.message ?? ''}`)
     .join(' ') ?? '';
   return /quota|rate.?limit|user.?rate/i.test(`${message} ${reasons}`);
+}
+
+async function gmailJson(response: Response): Promise<ReturnType<typeof JSON.parse>> {
+  return quotaBodies.has(response) ? quotaBodies.get(response) : incomingJson(response);
 }
 
 function getRetryAfterMs(response: Response): number | null {
@@ -117,11 +126,11 @@ export async function getValidAccessToken(accountId: string): Promise<string> {
   });
 
   if (!res.ok) {
-    const errorData = await res.json().catch(() => null);
+    const errorData = await gmailJson(res).catch(() => null);
     throw new GmailApiError('Failed to refresh Google OAuth token', res.status, errorData);
   }
 
-  const data = await res.json();
+  const data = await gmailJson(res);
   const newAccessToken = data.access_token;
   const newExpiry = new Date(Date.now() + (data.expires_in * 1000));
 
@@ -212,7 +221,9 @@ export function extractGmailAttachmentParts(
   if (!payload) return [];
 
   const parts: GmailMessagePart[] = [];
+  let visited = 0;
   const visit = (part: GmailMessagePart) => {
+    if (++visited > INCOMING_LIMITS.parts) throw new IncomingBudgetError();
     if (isGmailAttachmentPart(part)) parts.push(part);
     for (const childPart of part.parts ?? []) visit(childPart);
   };
@@ -221,8 +232,11 @@ export function extractGmailAttachmentParts(
   return parts;
 }
 
-export function decodeGmailBase64(data: string): Buffer {
-  return Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+export function decodeGmailBase64(data: string, limit: number = INCOMING_LIMITS.raw): Buffer {
+  if (typeof data !== 'string' || data.length > Math.ceil(limit / 3) * 4 || !/^[A-Za-z0-9_+\/=-]*$/.test(data)) throw new IncomingBudgetError();
+  const size = Buffer.byteLength(data, 'base64');
+  if (size > limit) throw new IncomingBudgetError();
+  return Buffer.from(data, 'base64');
 }
 
 /**
@@ -247,11 +261,11 @@ export async function fetchMessagesList(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError('Failed to fetch messages list from Gmail', res.status, err);
   }
 
-  const data = await res.json();
+  const data = await gmailJson(res);
   return {
     messages: data.messages || [],
     nextPageToken: data.nextPageToken,
@@ -272,11 +286,11 @@ export async function fetchMessageRaw(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError(`Failed to fetch message ${messageId} from Gmail`, res.status, err);
   }
 
-  const data = await res.json();
+  const data = await gmailJson(res);
 
   // Gmail returns raw as base64url encoded string
   return decodeGmailBase64(data.raw);
@@ -284,34 +298,38 @@ export async function fetchMessageRaw(
 
 export async function fetchMessageFull(
   accessToken: string,
-  messageId: string
+  messageId: string,
+  signal?: AbortSignal
 ): Promise<GmailFullMessage> {
   const res = await gmailFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`, {
+    signal,
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError(`Failed to fetch full message ${messageId} from Gmail`, res.status, err);
   }
 
-  return await res.json();
+  return await gmailJson(res);
 }
 
 export async function fetchGmailAttachment(
   accessToken: string,
   messageId: string,
-  attachmentId: string
+  attachmentId: string,
+  signal?: AbortSignal
 ): Promise<Buffer> {
   const res = await gmailFetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${attachmentId}`,
     {
+      signal,
       headers: { Authorization: `Bearer ${accessToken}` },
     }
   );
 
   if (!res.ok) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError(
       `Failed to fetch attachment ${attachmentId} for Gmail message ${messageId}`,
       res.status,
@@ -319,8 +337,10 @@ export async function fetchGmailAttachment(
     );
   }
 
-  const data = await res.json();
-  return decodeGmailBase64(data.data || '');
+  const data = await gmailJson(res);
+  const encoded = data.data || '';
+  if (Buffer.byteLength(encoded, 'base64') > INCOMING_LIMITS.attachment) throw new IncomingBudgetError();
+  return decodeGmailBase64(encoded, INCOMING_LIMITS.attachment);
 }
 
 /**
@@ -344,11 +364,11 @@ export async function sendMessageRaw(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError('Failed to send message via Gmail', res.status, err);
   }
 
-  return await res.json();
+  return await gmailJson(res);
 }
 
 /**
@@ -368,7 +388,7 @@ export async function trashMessage(
   );
 
   if (!res.ok) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError(`Failed to trash message ${messageId}`, res.status, err);
   }
 }
@@ -391,7 +411,7 @@ export async function deleteMessage(
 
   // 404 means it is already gone, which is the state we wanted.
   if (!res.ok && res.status !== 404) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError(`Failed to delete message ${messageId}`, res.status, err);
   }
 }
@@ -418,7 +438,7 @@ export async function modifyMessageLabels(
   );
 
   if (!res.ok) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError(`Failed to modify labels on message ${messageId}`, res.status, err);
   }
 }
@@ -443,9 +463,9 @@ export async function syncDraftRaw(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => null);
+    const err = await gmailJson(res).catch(() => null);
     throw new GmailApiError('Failed to sync draft via Gmail', res.status, err);
   }
 
-  return await res.json();
+  return await gmailJson(res);
 }

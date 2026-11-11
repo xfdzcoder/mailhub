@@ -1,3 +1,8 @@
+jest.mock('@/lib/email/incoming-budget', () => ({
+  ...jest.requireActual('@/lib/email/incoming-budget'),
+  readIncomingFile: jest.fn(),
+}));
+import { readIncomingFile, IncomingBudgetError, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
     email: {
@@ -73,7 +78,7 @@ const mockResolveMailboxPathOn = resolveMailboxPathOn as jest.Mock;
 const mockGetValidAccessToken = getValidAccessToken as jest.Mock;
 const mockFetchGmailAttachment = fetchGmailAttachment as jest.Mock;
 const mockFetchMessageFull = fetchMessageFull as jest.Mock;
-const mockFsReadFile = fs.readFile as jest.Mock;
+const mockFsReadFile = readIncomingFile as jest.Mock;
 
 function mockEmailWithImapReference(storagePath: string | null = null) {
   const mockDownload = jest.fn().mockResolvedValue({
@@ -200,7 +205,21 @@ describe('getReceivedAttachment', () => {
       content: Buffer.from('pdf'),
     });
     expect(mockGetMailboxLock).toHaveBeenCalledWith('INBOX', { readOnly: true });
-    expect(mockDownload).toHaveBeenCalledWith('42', '2.1', { uid: true });
+    expect(mockDownload).toHaveBeenCalledWith('42', '2.1', { uid: true, maxBytes: INCOMING_LIMITS.attachment + 1 });
+  });
+
+  it('releases the mailbox lock and stream after actual attachment overflow', async () => {
+    const { mockDownload, mockGetMailboxLock } = mockEmailWithImapReference();
+    const { Readable } = await import('node:stream');
+    const source = Readable.from((function* () {
+      const chunk = Buffer.alloc(64 * 1024);
+      for (let i = 0; i < 322; i++) yield chunk;
+    })());
+    mockDownload.mockResolvedValue({ content: source, meta: { size: 1 } });
+    await expect(getReceivedAttachment('email-1', 'att-1')).rejects.toBeInstanceOf(IncomingBudgetError);
+    expect(source.destroyed).toBe(true);
+    const lock = await mockGetMailboxLock.mock.results[0].value;
+    expect(lock.release).toHaveBeenCalledTimes(1);
   });
 
   it('maps IMAP transport failures to AttachmentProviderError', async () => {
@@ -238,7 +257,8 @@ describe('getReceivedAttachment', () => {
     expect(mockFetchGmailAttachment).toHaveBeenCalledWith(
       'access-token',
       'gmail-message-1',
-      'gmail-att-1'
+      'gmail-att-1',
+      undefined
     );
     expect(fs.writeFile).not.toHaveBeenCalled();
   });
@@ -250,7 +270,7 @@ describe('getReceivedAttachment', () => {
     await expect(getReceivedAttachment('email-1', 'att-1')).resolves.toMatchObject({
       content: Buffer.from('legacy'),
     });
-    expect(mockFsReadFile).toHaveBeenCalledWith('.storage/attachments/att-1');
+    expect(mockFsReadFile).toHaveBeenCalledWith('.storage/attachments/att-1', undefined);
   });
 
   it('falls back to IMAP when a stale storage path is missing', async () => {
@@ -263,8 +283,8 @@ describe('getReceivedAttachment', () => {
     await expect(getReceivedAttachment('email-1', 'att-1')).resolves.toMatchObject({
       content: Buffer.from('pdf'),
     });
-    expect(mockFsReadFile).toHaveBeenCalledWith('.storage/attachments/att-1');
-    expect(mockDownload).toHaveBeenCalledWith('42', '2.1', { uid: true });
+    expect(mockFsReadFile).toHaveBeenCalledWith('.storage/attachments/att-1', undefined);
+    expect(mockDownload).toHaveBeenCalledWith('42', '2.1', { uid: true, maxBytes: INCOMING_LIMITS.attachment + 1 });
   });
 
   it('falls back to Gmail when a stale storage path is missing', async () => {
@@ -277,11 +297,12 @@ describe('getReceivedAttachment', () => {
     await expect(getReceivedAttachment('email-1', 'att-1')).resolves.toMatchObject({
       content: Buffer.from('pdf'),
     });
-    expect(mockFsReadFile).toHaveBeenCalledWith('.storage/attachments/att-1');
+    expect(mockFsReadFile).toHaveBeenCalledWith('.storage/attachments/att-1', undefined);
     expect(mockFetchGmailAttachment).toHaveBeenCalledWith(
       'access-token',
       'gmail-message-1',
-      'gmail-att-1'
+      'gmail-att-1',
+      undefined
     );
   });
 
@@ -369,7 +390,8 @@ describe('getReceivedAttachment', () => {
     });
     expect(mockFetchMessageFull).toHaveBeenCalledWith(
       'access-token',
-      'gmail-message-1'
+      'gmail-message-1',
+      undefined
     );
   });
 });

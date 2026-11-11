@@ -1,3 +1,4 @@
+import { IncomingBudgetError } from '@/lib/email/incoming-budget';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { authenticate, apiError } from '@/lib/auth/middleware';
@@ -54,8 +55,8 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 
   try {
     const retrieved = attachment.storagePath
-      ? await readStoredAttachment(attachment)
-      : await getReceivedAttachment(email.id, attachment.id);
+      ? await readStoredAttachment(attachment, req.signal)
+      : await getReceivedAttachment(email.id, attachment.id, req.signal);
 
     const response = new NextResponse(new Uint8Array(retrieved.content));
     response.headers.set(
@@ -71,6 +72,10 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     return response;
   } catch (error) {
     console.error(error);
+
+    if (error instanceof IncomingBudgetError) {
+      return apiError('Attachment exceeds the bounded download policy (20 MiB). Use your mail provider to export larger historical attachments.', 413);
+    }
 
     if (error instanceof AttachmentNotFoundError) {
       return apiError('Attachment not found', 404);

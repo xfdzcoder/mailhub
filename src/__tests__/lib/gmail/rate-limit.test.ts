@@ -47,7 +47,8 @@ describe('Gmail API rate-limit handling', () => {
 
     jest
       .spyOn(global, 'setTimeout')
-      .mockImplementation(((callback: TimerHandler) => {
+      .mockImplementation(((callback: TimerHandler, delay?: number) => {
+        if (delay === 30000) return 0 as unknown as ReturnType<typeof setTimeout>;
         if (typeof callback === 'function') callback();
         return 0 as unknown as ReturnType<typeof setTimeout>;
       }) as unknown as typeof setTimeout);

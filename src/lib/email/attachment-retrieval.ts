@@ -1,4 +1,4 @@
-import { readFile } from 'fs/promises';
+import { readIncomingFile, readImapIncoming, IncomingBudgetError, INCOMING_LIMITS } from './incoming-budget';
 import { prisma } from '@/lib/db/prisma';
 import {
   decodeGmailBase64,
@@ -62,7 +62,8 @@ const DEFAULT_CONTENT_TYPE = 'application/octet-stream';
 
 export async function getReceivedAttachment(
   emailId: string,
-  attachmentId: string
+  attachmentId: string,
+  signal?: AbortSignal
 ): Promise<RetrievedAttachment> {
   const email = (await prisma.email.findFirst({
     where: {
@@ -102,7 +103,7 @@ export async function getReceivedAttachment(
 
   if (attachment.storagePath) {
     try {
-      return await readStoredAttachment(attachment);
+      return await readStoredAttachment(attachment, signal);
     } catch (error) {
       // Older versions could persist the storage path before the file was
       // successfully written. If the file is gone, continue with the
@@ -114,11 +115,11 @@ export async function getReceivedAttachment(
   }
 
   if (attachment.imapPart) {
-    return retrieveImapAttachment(email, attachment);
+    return retrieveImapAttachment(email, attachment, signal);
   }
 
   if (attachment.gmailAttachmentId || (email.providerMessageId && attachment.ordinal !== null)) {
-    return retrieveGmailAttachment(email, attachment);
+    return retrieveGmailAttachment(email, attachment, signal);
   }
 
   throw new AttachmentNotFoundError();
@@ -128,7 +129,8 @@ export async function readStoredAttachment(
   attachment: Pick<
     LoadedAttachment,
     'filename' | 'contentType' | 'storagePath'
-  >
+  >,
+  signal?: AbortSignal
 ): Promise<RetrievedAttachment> {
   if (!attachment.storagePath) {
     throw new AttachmentNotFoundError();
@@ -136,7 +138,7 @@ export async function readStoredAttachment(
 
   let content: Buffer;
   try {
-    content = await readFile(attachment.storagePath);
+    content = await readIncomingFile(attachment.storagePath, signal);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new AttachmentNotFoundError();
@@ -154,7 +156,8 @@ export async function readStoredAttachment(
 
 async function retrieveImapAttachment(
   email: LoadedEmail,
-  attachment: LoadedAttachment
+  attachment: LoadedAttachment,
+  signal?: AbortSignal
 ): Promise<RetrievedAttachment> {
   if (!email.uid || !email.folder || !attachment.imapPart) {
     throw new AttachmentNotFoundError();
@@ -175,14 +178,12 @@ async function retrieveImapAttachment(
 
         const lock = await client.getMailboxLock(mailboxPath, { readOnly: true });
         try {
-          const download = await client.download(String(email.uid), imapPart, {
-            uid: true,
-          });
+          const download = await readImapIncoming(client, String(email.uid), imapPart, INCOMING_LIMITS.attachment, signal);
           if (!download) {
             return null;
           }
 
-          const content = await collectBuffer(download.content);
+          const content = download.content;
 
           return {
             filename:
@@ -209,7 +210,7 @@ async function retrieveImapAttachment(
 
     return result;
   } catch (error) {
-    if (error instanceof AttachmentNotFoundError) {
+    if (error instanceof AttachmentNotFoundError || error instanceof IncomingBudgetError) {
       throw error;
     }
 
@@ -219,7 +220,8 @@ async function retrieveImapAttachment(
 
 async function retrieveGmailAttachment(
   email: LoadedEmail,
-  attachment: LoadedAttachment
+  attachment: LoadedAttachment,
+  signal?: AbortSignal
 ): Promise<RetrievedAttachment> {
   if (!email.providerMessageId) {
     throw new AttachmentNotFoundError();
@@ -232,13 +234,14 @@ async function retrieveGmailAttachment(
       content = await fetchGmailAttachment(
         accessToken,
         email.providerMessageId,
-        attachment.gmailAttachmentId
+        attachment.gmailAttachmentId,
+        signal
       );
     } else if (attachment.ordinal !== null) {
-      const fullMessage = await fetchMessageFull(accessToken, email.providerMessageId);
+      const fullMessage = await fetchMessageFull(accessToken, email.providerMessageId, signal);
       const part = extractGmailAttachmentParts(fullMessage.payload)[attachment.ordinal];
       if (!part?.body?.data) throw new AttachmentNotFoundError();
-      content = decodeGmailBase64(part.body.data);
+      content = decodeGmailBase64(part.body.data, INCOMING_LIMITS.attachment);
     } else {
       throw new AttachmentNotFoundError();
     }
@@ -250,22 +253,11 @@ async function retrieveGmailAttachment(
       content,
     };
   } catch (error) {
+    if (error instanceof IncomingBudgetError || error instanceof AttachmentNotFoundError) throw error;
     if (error instanceof GmailApiError && error.status === 404) {
       throw new AttachmentNotFoundError();
     }
 
     throw new AttachmentProviderError('Failed to fetch Gmail attachment');
   }
-}
-
-async function collectBuffer(
-  content: AsyncIterable<Buffer> | Iterable<Buffer>
-): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-
-  for await (const chunk of content) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-
-  return Buffer.concat(chunks);
 }
