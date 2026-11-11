@@ -1,4 +1,4 @@
-import { sendEmail } from '@/lib/smtp/sender';
+import { sendEmail, sendGraphEmail } from '@/lib/smtp/sender';
 import { getDecryptedAccount } from '@/lib/accounts/service';
 import { getValidOAuthAccessToken } from '@/lib/accounts/tokens';
 import { getValidAccessToken, sendMessageRaw } from '@/lib/gmail/api';
@@ -30,6 +30,16 @@ describe('sendEmail sender', () => {
       family: 4,
       servername: host,
     }));
+  });
+
+  it('validates direct rule/helper callers before account lookup or delivery', async () => {
+    const input = { to: ['recipient@example.test'], subject: 'x', attachments: [{ filename: 'x', contentType: 'text/plain', content: 'Zh==' }] };
+    await expect(sendEmail('account', input)).rejects.toMatchObject({ status: 422 });
+    expect(mockGetDecryptedAccount).not.toHaveBeenCalled();
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock;
+    await expect(sendGraphEmail('synthetic-token', input)).rejects.toMatchObject({ status: 422 });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('sends email using Microsoft Graph API for Outlook accounts', async () => {

@@ -1,3 +1,4 @@
+import { readOutgoingJson, validateOutgoingMail, OutgoingInputError, checkBytes, outgoingLimits, validateRawOutgoing } from '@/lib/email/outgoing-budget';
 import { NextRequest } from 'next/server';
 import { authenticate, apiResponse, apiError } from '@/lib/auth/middleware';
 import { prisma } from '@/lib/db/prisma';
@@ -8,7 +9,7 @@ import { getValidAccessToken, syncDraftRaw } from '@/lib/gmail/api';
 import { accountAccessWhere } from '@/lib/accounts/access';
 import { resolveSafeOutboundHost } from '@/lib/network/outbound-host';
 
-import * as fs from 'fs/promises';
+import { readOutgoingFile } from '@/lib/email/outgoing-files';
 
 const syncDraftSchema = z.object({
   draftId: z.string(),
@@ -31,15 +32,25 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   if (!account) return apiError('Account not found', 404);
 
-  const body = await req.json();
+  let body: unknown;
+  try { body = await readOutgoingJson(req); }
+  catch (error) {
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
+    throw error;
+  }
   const parsed = syncDraftSchema.safeParse(body);
   if (!parsed.success) return apiError(parsed.error.issues[0].message, 422);
+  try { checkBytes(parsed.data.draftId, outgoingLimits().argumentBytes, 'Draft ID'); }
+  catch (error) {
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
+    throw error;
+  }
 
   const { draftId } = parsed.data;
 
   const draft = await prisma.email.findFirst({
     where: { id: draftId, accountId },
-    include: { body: true, attachments: true },
+    include: { body: true, attachments: { take: outgoingLimits().attachments + 1 } },
   });
 
   if (!draft || !draft.isDraft) {
@@ -57,24 +68,22 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return addrs.length ? addrs.join(', ') : undefined;
     };
 
-    const attachmentsList = await Promise.all(
-      (draft.attachments || []).map(async (att) => {
-        if (!att.storagePath) return null;
-        try {
-          const content = await fs.readFile(att.storagePath);
-          return {
-            filename: att.filename || 'attachment',
-            content,
-            contentType: att.contentType || 'application/octet-stream',
-          };
-        } catch {
-          return null;
-        }
-      })
-    );
-    const validAttachments = attachmentsList.filter(
-      (a): a is NonNullable<typeof a> => a !== null
-    );
+    const to = joinAddresses(draft.toAddresses);
+    const cc = joinAddresses(draft.ccAddresses);
+    const bcc = joinAddresses(draft.bccAddresses);
+    validateOutgoingMail({ to, cc, bcc, subject: draft.subject, bodyHtml: draft.body?.bodyHtml, bodyText: draft.body?.bodyText });
+    const limits = outgoingLimits();
+    if (draft.attachments.length > limits.attachments) throw new OutgoingInputError('Too many attachments');
+    let total = 0;
+    const validAttachments = [];
+    for (const att of draft.attachments) {
+      checkBytes(att.filename, limits.headerBytes, 'Filename');
+      checkBytes(att.contentType, limits.headerBytes, 'Content type');
+      if (!att.storagePath) continue;
+      const content = await readOutgoingFile(att.storagePath, limits.totalAttachmentBytes - total);
+      total += content.length;
+      validAttachments.push({ filename: att.filename || 'attachment', contentType: att.contentType || 'application/octet-stream', content });
+    }
 
     const composer = new MailComposer({
       from: `"${account.label}" <${account.emailAddress}>`,
@@ -88,6 +97,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       keepBcc: true,
     });
     const rawBuffer = await composer.compile().build();
+    validateRawOutgoing(rawBuffer);
 
     if (account.provider === 'gmail') {
       const accessToken = await getValidAccessToken(account.id);
@@ -112,14 +122,19 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           logger: false,
         });
 
-        await client.connect();
-        await client.append('Drafts', rawBuffer, ['\\Draft']);
-        await client.logout();
+        try {
+          await client.connect();
+          await client.append('Drafts', rawBuffer, ['\\Draft']);
+          await client.logout();
+        } finally {
+          client.close();
+        }
       }
     }
 
     return apiResponse({ success: true, ...(warning ? { warning } : {}) });
   } catch (error) {
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
     console.error('IMAP sync draft error:', error);
     // Don't fail the API call if IMAP sync fails, as local save succeeded
     return apiResponse({ success: true, warning: 'Failed to sync to IMAP' });

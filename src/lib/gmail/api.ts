@@ -1,3 +1,4 @@
+import { validateRawOutgoing } from '@/lib/email/outgoing-budget';
 import { decrypt, encrypt } from '@/lib/crypto';
 import { prisma } from '@/lib/db/prisma';
 import { getGmailRequestKey, withGmailRateLimit } from './rate-limit';
@@ -330,6 +331,7 @@ export async function sendMessageRaw(
   rawMessage: Buffer
 ): Promise<{ id: string; threadId: string; labelIds: string[] }> {
   // Base64url encode the buffer
+  validateRawOutgoing(rawMessage);
   const base64Str = rawMessage.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
   const res = await gmailFetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
@@ -428,6 +430,7 @@ export async function syncDraftRaw(
   accessToken: string,
   rawMessage: Buffer
 ): Promise<{ id: string; message: { id: string; threadId: string } }> {
+  validateRawOutgoing(rawMessage);
   const base64Str = rawMessage.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
   const res = await gmailFetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
