@@ -1,4 +1,6 @@
 -- Additive only: no legacy rows or files are touched.
+BEGIN;
+
 CREATE TABLE "stored_attachment_objects" (
  "id" UUID PRIMARY KEY, "storage_key" TEXT NOT NULL UNIQUE,
  "organization_id" UUID, "account_id" UUID,
@@ -30,3 +32,5 @@ CREATE TABLE "attachment_storage_reservations" (
 );
 CREATE INDEX "attachment_storage_reservations_state_expires_at_idx" ON "attachment_storage_reservations"("state", "expires_at");
 CREATE INDEX "attachment_storage_reservations_organization_id_state_idx" ON "attachment_storage_reservations"("organization_id", "state");
+
+COMMIT;
