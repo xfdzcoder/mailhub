@@ -86,6 +86,8 @@ then objects in that order inside a transaction; verify legacy rows and file has
 again. Never drop populated accounting evidence in production. A later forward
 migration is required if the foundation needs revision after adoption.
 
-Validation in this implementation environment: PostgreSQL/psql, Docker and installed
-Node dependencies are unavailable. Fresh deploy, upgrade, reapply and rollback are
-therefore documented procedures, not claimed executed results.
+Verified on disposable PostgreSQL 17: fresh deploy, upgrade with synthetic legacy
+rows and a shared file, repeat deploy, uniqueness and size constraints, retention
+of accounting evidence after account deletion, and schema rollback. The application
+schema and its synthetic file survived upgrade and rollback. Also verified deployment
+after the credential storage migration already ran on the database.
