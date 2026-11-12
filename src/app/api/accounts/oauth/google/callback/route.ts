@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db/prisma';
 import { encrypt } from '@/lib/crypto';
 import { verifySessionToken as verifyToken } from '@/lib/auth/sessions';
 import { createOwnedAccount } from '@/lib/accounts/service';
+import { callbackUri, consumeOAuthTransaction, OAuthStateError, trustedOrigin } from '@/lib/oauth/transactions';
+import { authorizeSession, SessionError } from '@/lib/auth/sessions';
 import { normalizeEmailAddress } from '@/lib/email/addresses';
 
 const ACCOUNT_COLORS = [
@@ -43,7 +45,10 @@ function findExistingAccount(organizationId: string, emailAddress: string) {
 }
 
 export async function GET(req: NextRequest) {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || req.url;
+  let baseUrl: string;
+  try { baseUrl = trustedOrigin(); } catch {
+    return NextResponse.json({ error: 'OAuth callback origin unavailable' }, { status: 503 });
+  }
 
   try {
     const url = new URL(req.url);
@@ -60,26 +65,18 @@ export async function GET(req: NextRequest) {
     // We authenticate manually here since this is a GET redirect from Google
     const auth = await verifyToken(token);
 
+    const redirectUri = callbackUri('google');
+    // Standalone Next.js uses the listening address as the request origin.
+    // Bind the trusted public URI through the atomic transaction check below.
+    if (url.pathname !== new URL(redirectUri).pathname) {
+      return NextResponse.redirect(new URL('/settings/accounts?error=invalid_callback_origin', baseUrl));
+    }
+    const state = await consumeOAuthTransaction(stateStr, 'google', auth, redirectUri);
     if (error) {
-      console.error('OAuth error returned from Google:', error);
       return NextResponse.redirect(new URL('/settings/accounts?error=oauth_rejected', baseUrl));
     }
-
-    if (!code || !stateStr) {
+    if (!code) {
       return NextResponse.redirect(new URL('/settings/accounts?error=missing_oauth_params', baseUrl));
-    }
-
-    // Decode the state
-    let state: { emailAddress: string; label: string; organizationId: string };
-    try {
-      state = JSON.parse(Buffer.from(stateStr, 'base64').toString('utf8'));
-    } catch (e) {
-      console.error('Failed to parse OAuth state:', e);
-      return NextResponse.redirect(new URL('/settings/accounts?error=invalid_state', baseUrl));
-    }
-
-    if (state.organizationId !== auth.organizationId) {
-      return NextResponse.redirect(new URL('/settings/accounts?error=invalid_organization', baseUrl));
     }
 
     const requestedEmailAddress = normalizeEmailAddress(state.emailAddress);
@@ -101,9 +98,6 @@ export async function GET(req: NextRequest) {
       return NextResponse.redirect(new URL('/settings/accounts?error=missing_server_config', baseUrl));
     }
 
-    const origin = process.env.NEXT_PUBLIC_APP_URL || url.origin;
-    const redirectUri = `${origin}/api/accounts/oauth/google/callback`;
-
     // Exchange code for tokens
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
@@ -114,17 +108,19 @@ export async function GET(req: NextRequest) {
         client_secret: clientSecret,
         redirect_uri: redirectUri,
         grant_type: 'authorization_code',
+        code_verifier: state.verifier,
       }),
     });
 
     const tokens = await tokenResponse.json();
 
     if (!tokenResponse.ok) {
-      console.error('Google OAuth token exchange failed:', tokens);
       return NextResponse.redirect(new URL('/settings/accounts?error=token_exchange_failed', baseUrl));
     }
 
-    if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
+    if (!tokens || typeof tokens.access_token !== 'string' || !tokens.access_token ||
+        typeof tokens.expires_in !== 'number' || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0 ||
+        (tokens.refresh_token !== undefined && typeof tokens.refresh_token !== 'string')) {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
@@ -135,15 +131,13 @@ export async function GET(req: NextRequest) {
       userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
-    } catch (error) {
-      console.error('Google identity lookup failed:', error);
+    } catch {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
     }
 
     if (!userInfoResponse.ok) {
-      console.error('Google identity lookup failed:', userInfoResponse.status);
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
@@ -152,8 +146,7 @@ export async function GET(req: NextRequest) {
     let userInfo: unknown;
     try {
       userInfo = await userInfoResponse.json();
-    } catch (error) {
-      console.error('Google identity response was invalid:', error);
+    } catch {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
@@ -167,11 +160,17 @@ export async function GET(req: NextRequest) {
       typeof providerEmail === 'string' && providerEmail.trim().length > 0
         ? normalizeEmailAddress(providerEmail)
         : null;
-    if (!emailAddress) {
+    if (!emailAddress || (userInfo as { verified_email?: unknown }).verified_email !== true) {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
     }
+
+    if (emailAddress !== normalizeEmailAddress(state.emailAddress)) {
+      return NextResponse.redirect(new URL('/settings/accounts?error=provider_identity_mismatch', baseUrl));
+    }
+    // Recheck revocation and current membership after provider network calls.
+    const currentAuth = await authorizeSession(auth);
 
     const existingAccount =
       initialExistingAccount
@@ -179,7 +178,7 @@ export async function GET(req: NextRequest) {
         ? initialExistingAccount
         : await findExistingAccount(auth.organizationId, emailAddress);
 
-    if (existingAccount && !canReauthorizeExistingAccount(auth, existingAccount.ownerUserId)) {
+    if (existingAccount && !canReauthorizeExistingAccount(currentAuth, existingAccount.ownerUserId)) {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=unauthorized_reauthorization', baseUrl)
       );
@@ -243,8 +242,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(
       new URL(`/settings/accounts?success=true&accountId=${account.id}&share=1`, baseUrl)
     );
-  } catch (error: any) {
-    console.error('Google OAuth error:', error);
+  } catch (error: unknown) {
+    if (error instanceof OAuthStateError) {
+      return NextResponse.redirect(new URL('/settings/accounts?error=invalid_state', baseUrl));
+    }
+    if (error instanceof SessionError) {
+      return NextResponse.redirect(new URL('/login?error=auth_required', baseUrl));
+    }
+
     return NextResponse.redirect(new URL('/settings/accounts?error=internal_error', baseUrl));
   }
 }

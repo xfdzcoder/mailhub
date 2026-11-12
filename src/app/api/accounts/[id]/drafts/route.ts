@@ -1,3 +1,4 @@
+import { readOutgoingJson, validateOutgoingMail, OutgoingInputError } from '@/lib/email/outgoing-budget';
 import { NextRequest } from 'next/server';
 import { authenticate, apiResponse, apiError } from '@/lib/auth/middleware';
 import { prisma } from '@/lib/db/prisma';
@@ -6,9 +7,9 @@ import { z } from 'zod';
 import { parseAddresses } from '@/lib/email/addresses';
 import { accountAccessWhere } from '@/lib/accounts/access';
 
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { randomUUID } from 'crypto';
+import { stageOutgoingFiles } from '@/lib/email/outgoing-files';
+import { unlink } from 'fs/promises';
+import path from 'path';
 
 const saveDraftSchema = z.object({
   draftId: z.string().optional(),
@@ -49,111 +50,122 @@ export async function PUT(req: NextRequest, { params }: RouteParams) {
 
   if (!account) return apiError('Account not found', 404);
 
-  const body = await req.json();
+  let body: unknown;
+  try { body = await readOutgoingJson(req); }
+  catch (error) {
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
+    throw error;
+  }
   const parsed = saveDraftSchema.safeParse(body);
   if (!parsed.success) return apiError(parsed.error.issues[0].message, 422);
+  try { validateOutgoingMail(parsed.data); }
+  catch (error) {
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
+    throw error;
+  }
 
   const data = parsed.data;
 
+  let staged: Awaited<ReturnType<typeof stageOutgoingFiles>> | undefined;
   try {
-    let emailId = data.draftId;
-    const toAddresses = parseAddresses(data.to || '').map((address) => ({ address, name: '' }));
-    const ccAddresses = parseAddresses(data.cc || '').map((address) => ({ address, name: '' }));
-    const bccAddresses = parseAddresses(data.bcc || '').map((address) => ({ address, name: '' }));
-    const hasAttachments = !!(data.attachments && data.attachments.length > 0);
+    staged = await stageOutgoingFiles(data.attachments || [], req.signal);
+    if (req.signal.aborted) throw new OutgoingInputError('Request aborted', 400);
+    const replacedPaths: string[] = [];
+    const draftId = await prisma.$transaction(async (tx) => {
+      let emailId = data.draftId;
+      const toAddresses = parseAddresses(data.to || '').map((address) => ({ address, name: '' }));
+      const ccAddresses = parseAddresses(data.cc || '').map((address) => ({ address, name: '' }));
+      const bccAddresses = parseAddresses(data.bcc || '').map((address) => ({ address, name: '' }));
+      const hasAttachments = !!(data.attachments && data.attachments.length > 0);
 
-    if (emailId) {
-      const existingDraft = await prisma.email.findFirst({
-        where: {
-          id: emailId,
-          isDraft: true,
-          account: accountAccessWhere(auth),
-        },
-        select: { id: true },
-      });
+      if (emailId) {
+        const existingDraft = await tx.email.findFirst({
+          where: {
+            id: emailId,
+            isDraft: true,
+            account: accountAccessWhere(auth),
+          },
+          select: { id: true },
+        });
 
-      if (!existingDraft) return apiError('Draft not found', 404);
+        if (!existingDraft) throw new OutgoingInputError('Draft not found', 404);
 
-      // Updating accountId moves the local draft when the user changes From.
-      await prisma.email.update({
-        where: { id: emailId },
-        data: {
-          accountId,
-          fromAddress: account.emailAddress,
-          subject: data.subject || '',
-          toAddresses,
-          ccAddresses,
-          bccAddresses,
-          hasAttachments,
-          body: {
-            upsert: {
+        // Updating accountId moves the local draft when the user changes From.
+        await tx.email.update({
+          where: { id: emailId },
+          data: {
+            accountId,
+            fromAddress: account.emailAddress,
+            subject: data.subject || '',
+            toAddresses,
+            ccAddresses,
+            bccAddresses,
+            ...(data.attachments !== undefined ? { hasAttachments } : {}),
+            body: {
+              upsert: {
+                create: {
+                  bodyHtml: data.bodyHtml || '',
+                  bodyText: data.bodyText || '',
+                },
+                update: {
+                  bodyHtml: data.bodyHtml || '',
+                  bodyText: data.bodyText || '',
+                },
+              },
+            },
+          },
+        });
+      } else {
+        // Create new draft
+        const newDraft = await tx.email.create({
+          data: {
+            accountId,
+            messageId: `<${uuidv4()}@draft.local>`,
+            // Folder values are normalized across IMAP, Gmail, and list queries.
+            folder: 'DRAFTS',
+            subject: data.subject || '',
+            fromAddress: account.emailAddress,
+            toAddresses,
+            ccAddresses,
+            bccAddresses,
+            isRead: true,
+            isDraft: true,
+            hasAttachments,
+            body: {
               create: {
                 bodyHtml: data.bodyHtml || '',
                 bodyText: data.bodyText || '',
               },
-              update: {
-                bodyHtml: data.bodyHtml || '',
-                bodyText: data.bodyText || '',
-              },
             },
-          },
-        },
-      });
-    } else {
-      // Create new draft
-      const newDraft = await prisma.email.create({
-        data: {
-          accountId,
-          messageId: `<${uuidv4()}@draft.local>`,
-          // Folder values are normalized across IMAP, Gmail, and list queries.
-          folder: 'DRAFTS',
-          subject: data.subject || '',
-          fromAddress: account.emailAddress,
-          toAddresses,
-          ccAddresses,
-          bccAddresses,
-          isRead: true,
-          isDraft: true,
-          hasAttachments,
-          body: {
-            create: {
-              bodyHtml: data.bodyHtml || '',
-              bodyText: data.bodyText || '',
-            },
-          },
-        },
-      });
-      emailId = newDraft.id;
-    }
-
-    if (data.attachments && data.attachments.length > 0) {
-      const storageDir = path.join(process.cwd(), '.storage', 'attachments');
-      await fs.mkdir(storageDir, { recursive: true });
-
-      // Delete existing attachments if any to synchronize draft attachments
-      await prisma.attachment.deleteMany({ where: { emailId } });
-
-      for (const att of data.attachments) {
-        const attachmentId = att.id || randomUUID();
-        const storagePath = path.join(storageDir, attachmentId);
-        const buffer = Buffer.from(att.content, 'base64');
-        await fs.writeFile(storagePath, buffer);
-
-        await prisma.attachment.create({
-          data: {
-            id: attachmentId,
-            emailId,
-            filename: att.filename,
-            contentType: att.contentType,
-            sizeBytes: att.sizeBytes || buffer.length,
-            storagePath,
           },
         });
+        emailId = newDraft.id;
       }
-    }
 
-    return apiResponse({ success: true, draftId: emailId, accountId });
+      // Omitted attachments preserve existing files; an explicit empty array removes them.
+      if (data.attachments !== undefined) {
+        const previous = await tx.attachment.findMany({ where: { emailId }, select: { storagePath: true } });
+        for (const att of previous) if (att.storagePath) replacedPaths.push(att.storagePath);
+        await tx.attachment.deleteMany({ where: { emailId } });
+        for (const file of staged!.files) {
+          await tx.attachment.create({ data: { ...file, emailId: emailId! } });
+        }
+      }
+      return emailId;
+    });
+
+    // Only remove superseded local files after commit, and never remove shared files.
+    for (const storagePath of new Set(replacedPaths)) {
+      try {
+        const storageDir = path.join(process.cwd(), '.storage', 'attachments');
+        if (path.dirname(path.resolve(storagePath)) !== storageDir) continue;
+        if (await prisma.attachment.count({ where: { storagePath } }) === 0) await unlink(storagePath);
+      } catch (error) { console.error('Failed to clean replaced draft attachment:', error); }
+    }
+    return apiResponse({ success: true, draftId, accountId });
   } catch (error) {
+    await staged?.cleanup();
+    if (error instanceof OutgoingInputError) return apiError(error.message, error.status);
     console.error('Save draft error:', error);
     return apiError('Failed to save draft', 500);
   }

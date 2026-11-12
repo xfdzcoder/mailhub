@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db/prisma';
 import { encrypt } from '@/lib/crypto';
 import { verifySessionToken as verifyToken } from '@/lib/auth/sessions';
 import { createOwnedAccount } from '@/lib/accounts/service';
+import { callbackUri, consumeOAuthTransaction, OAuthStateError, trustedOrigin } from '@/lib/oauth/transactions';
+import { authorizeSession, SessionError } from '@/lib/auth/sessions';
 import { normalizeEmailAddress } from '@/lib/email/addresses';
 
 const ACCOUNT_COLORS = [
@@ -48,7 +50,10 @@ type ExistingOwnedAccount = {
 };
 
 export async function GET(req: NextRequest) {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || req.url;
+  let baseUrl: string;
+  try { baseUrl = trustedOrigin(); } catch {
+    return NextResponse.json({ error: 'OAuth callback origin unavailable' }, { status: 503 });
+  }
 
   try {
     const url = new URL(req.url);
@@ -65,26 +70,18 @@ export async function GET(req: NextRequest) {
     // We authenticate manually here since this is a GET redirect from Microsoft
     const auth = await verifyToken(token);
 
+    const redirectUri = callbackUri('microsoft');
+    // Standalone Next.js uses the listening address as the request origin.
+    // Bind the trusted public URI through the atomic transaction check below.
+    if (url.pathname !== new URL(redirectUri).pathname) {
+      return NextResponse.redirect(new URL('/settings/accounts?error=invalid_callback_origin', baseUrl));
+    }
+    const state = await consumeOAuthTransaction(stateStr, 'microsoft', auth, redirectUri);
     if (error) {
-      console.error('OAuth error returned from Microsoft:', error);
       return NextResponse.redirect(new URL('/settings/accounts?error=oauth_rejected', baseUrl));
     }
-
-    if (!code || !stateStr) {
+    if (!code) {
       return NextResponse.redirect(new URL('/settings/accounts?error=missing_oauth_params', baseUrl));
-    }
-
-    // Decode the state
-    let state: { label: string; organizationId: string };
-    try {
-      state = JSON.parse(Buffer.from(stateStr, 'base64').toString('utf8'));
-    } catch (e) {
-      console.error('Failed to parse OAuth state:', e);
-      return NextResponse.redirect(new URL('/settings/accounts?error=invalid_state', baseUrl));
-    }
-
-    if (state.organizationId !== auth.organizationId) {
-      return NextResponse.redirect(new URL('/settings/accounts?error=invalid_organization', baseUrl));
     }
 
     const clientId = process.env.MICROSOFT_CLIENT_ID;
@@ -93,9 +90,6 @@ export async function GET(req: NextRequest) {
     if (!clientId || !clientSecret) {
       return NextResponse.redirect(new URL('/settings/accounts?error=missing_server_config', baseUrl));
     }
-
-    const origin = process.env.NEXT_PUBLIC_APP_URL || url.origin;
-    const redirectUri = `${origin}/api/accounts/oauth/microsoft/callback`;
 
     // Exchange code for tokens
     const tokenResponse = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
@@ -107,18 +101,19 @@ export async function GET(req: NextRequest) {
         client_secret: clientSecret,
         redirect_uri: redirectUri,
         grant_type: 'authorization_code',
+        code_verifier: state.verifier,
       }),
     });
 
     const tokens = await tokenResponse.json();
 
     if (!tokenResponse.ok) {
-      console.error('Microsoft OAuth token exchange failed:', JSON.stringify(tokens, null, 2));
-      const errorMsg = encodeURIComponent(tokens.error_description || tokens.error || 'token_exchange_failed');
-      return NextResponse.redirect(new URL(`/settings/accounts?error=${errorMsg}`, baseUrl));
+      return NextResponse.redirect(new URL('/settings/accounts?error=token_exchange_failed', baseUrl));
     }
 
-    if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
+    if (!tokens || typeof tokens.access_token !== 'string' || !tokens.access_token ||
+        typeof tokens.expires_in !== 'number' || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0 ||
+        (tokens.refresh_token !== undefined && typeof tokens.refresh_token !== 'string')) {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
@@ -133,15 +128,13 @@ export async function GET(req: NextRequest) {
           headers: { Authorization: `Bearer ${tokens.access_token}` },
         }
       );
-    } catch (error) {
-      console.error('Microsoft Graph identity lookup failed:', error);
+    } catch {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
     }
 
     if (!profileResponse.ok) {
-      console.error('Microsoft Graph identity lookup failed:', profileResponse.status);
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
@@ -150,8 +143,7 @@ export async function GET(req: NextRequest) {
     let profile: unknown;
     try {
       profile = await profileResponse.json();
-    } catch (error) {
-      console.error('Microsoft Graph identity response was invalid:', error);
+    } catch {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=provider_identity_unconfirmed', baseUrl)
       );
@@ -164,6 +156,12 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    if (emailAddress !== normalizeEmailAddress(state.emailAddress)) {
+      return NextResponse.redirect(new URL('/settings/accounts?error=provider_identity_mismatch', baseUrl));
+    }
+    // Recheck revocation and current membership after provider network calls.
+    const currentAuth = await authorizeSession(auth);
+
     const existingAccount = await prisma.emailAccount.findFirst({
       where: {
         organizationId: auth.organizationId,
@@ -171,7 +169,7 @@ export async function GET(req: NextRequest) {
       },
     }) as ExistingOwnedAccount | null;
 
-    if (existingAccount && !canReauthorizeExistingAccount(auth, existingAccount.ownerUserId)) {
+    if (existingAccount && !canReauthorizeExistingAccount(currentAuth, existingAccount.ownerUserId)) {
       return NextResponse.redirect(
         new URL('/settings/accounts?error=unauthorized_reauthorization', baseUrl)
       );
@@ -234,8 +232,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(
       new URL(`/settings/accounts?success=true&accountId=${account.id}&share=1`, baseUrl)
     );
-  } catch (error: any) {
-    console.error('Microsoft OAuth error:', error);
+  } catch (error: unknown) {
+    if (error instanceof OAuthStateError) {
+      return NextResponse.redirect(new URL('/settings/accounts?error=invalid_state', baseUrl));
+    }
+    if (error instanceof SessionError) {
+      return NextResponse.redirect(new URL('/login?error=auth_required', baseUrl));
+    }
+
     return NextResponse.redirect(new URL('/settings/accounts?error=internal_error', baseUrl));
   }
 }

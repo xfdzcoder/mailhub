@@ -1,3 +1,4 @@
+jest.mock('@/lib/notifications/push', () => ({ sendPush: jest.fn(), reportPushFailure: jest.fn() }));
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
     pushSubscription: {

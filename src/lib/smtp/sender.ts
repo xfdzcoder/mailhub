@@ -1,3 +1,4 @@
+import { validateOutgoingMail } from '@/lib/email/outgoing-budget';
 import { createTransport, Transporter } from 'nodemailer';
 import { getDecryptedAccount } from '@/lib/accounts/service';
 import type { SendEmailInput } from '@/lib/validation';
@@ -9,6 +10,7 @@ export async function sendGraphEmail(
   accessToken: string,
   input: SendEmailInput
 ): Promise<{ messageId: string }> {
+  validateOutgoingMail(input);
   const url = 'https://graph.microsoft.com/v1.0/me/sendMail';
 
   const toRecipients = input.to.map((address) => ({
@@ -64,7 +66,13 @@ export async function sendEmail(
   accountId: string,
   input: SendEmailInput
 ): Promise<{ messageId: string }> {
+  validateOutgoingMail(input);
   const account = await getDecryptedAccount(accountId);
+  if (account.provider !== 'gmail' && (account.provider === 'outlook' || account.oauthProvider === 'microsoft')) {
+    const { getValidOAuthAccessToken } = await import('@/lib/accounts/tokens');
+    const accessToken = await getValidOAuthAccessToken(account.id, 'https://graph.microsoft.com/.default offline_access');
+    return await sendGraphEmail(accessToken, input);
+  }
 
   const nodemailerAttachments = input.attachments?.map((att) => ({
     filename: att.filename,
@@ -87,11 +95,12 @@ export async function sendEmail(
 
   if (account.provider === 'gmail') {
     // For Gmail accounts, construct raw email with keepBcc so Gmail API parses BCC recipients
-    const MailComposer = require('nodemailer/lib/mail-composer');
-    const composer = new MailComposer({
+    const { default: MailComposer } = await import('nodemailer/lib/mail-composer');
+    const composerOptions = {
       ...mailOptions,
       keepBcc: true,
-    });
+    };
+    const composer = new MailComposer(composerOptions);
     const message = composer.compile();
     message.keepBcc = true;
     const rawBuffer = await message.build();
@@ -101,10 +110,6 @@ export async function sendEmail(
 
     // Attempt to queue the email to be fully indexed immediately or just rely on the sync worker
     return { messageId: result.id || `<${createUniqueId('gmail')}>` };
-  } else if (account.provider === 'outlook' || account.oauthProvider === 'microsoft') {
-    const { getValidOAuthAccessToken } = await import('@/lib/accounts/tokens');
-    const accessToken = await getValidOAuthAccessToken(account.id, 'https://graph.microsoft.com/.default offline_access');
-    return await sendGraphEmail(accessToken, input);
   } else {
     // For other providers (custom IMAP/SMTP)
     if (!account.smtpHost || !account.decryptedPassword) {
@@ -131,11 +136,12 @@ export async function sendEmail(
     // If IMAP settings are available, attempt to append sent message to IMAP Sent folder
     if (account.imapHost && account.passwordEncrypted) {
       try {
-        const MailComposer = require('nodemailer/lib/mail-composer');
-        const composer = new MailComposer({
+        const { default: MailComposer } = await import('nodemailer/lib/mail-composer');
+        const composerOptions = {
           ...mailOptions,
           keepBcc: true,
-        });
+        };
+        const composer = new MailComposer(composerOptions);
         const rawBuffer = await composer.compile().build();
 
         const { ImapFlow } = await import('imapflow');

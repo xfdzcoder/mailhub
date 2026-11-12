@@ -39,7 +39,7 @@ describe('AI API Routes', () => {
     jest.clearAllMocks();
     (prisma.systemPreference.upsert as jest.Mock).mockResolvedValue({ isAiEnabled: true, semanticSearchEnabled: true });
     (prisma.experimentSetting.findUnique as jest.Mock).mockResolvedValue({ isAiEnabled: true, aiProvider: "openai", aiApiKey: "test-key", aiModelName: "test-model" });
-    (prisma.organizationMember.findUnique as jest.Mock).mockResolvedValue({ personalAiEnabled: true });
+    (prisma.organizationMember.findUnique as jest.Mock).mockResolvedValue({ userId: 'member-1' });
     mockAuthenticate.mockResolvedValue({
       userId: 'member-1',
       organizationId: 'org-1',
@@ -54,6 +54,20 @@ describe('AI API Routes', () => {
   });
 
   describe('POST /api/ai/draft', () => {
+    it('rejects oversized draft arguments before model or account work', async () => {
+      const previous = process.env.OUTGOING_BODY_BYTES;
+      process.env.OUTGOING_BODY_BYTES = '4';
+      try {
+        const res = await draftPost(new Request('http://localhost/api/ai/draft', { method: 'POST', body: JSON.stringify({ accountId: 'account-1', prompt: 'ééa' }) }));
+        expect(res.status).toBe(413);
+        expect(modelPostJson).not.toHaveBeenCalled();
+        expect(mockFindAccount).not.toHaveBeenCalled();
+      } finally {
+        if (previous === undefined) delete process.env.OUTGOING_BODY_BYTES;
+        else process.env.OUTGOING_BODY_BYTES = previous;
+      }
+    });
+
     it('returns 400 if prompt and existingText are missing', async () => {
       const req = new Request('http://localhost/api/ai/draft', {
         method: 'POST',

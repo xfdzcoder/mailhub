@@ -8,7 +8,9 @@ revision. Existing migrations and mail data are unchanged. Existing users receiv
 
 ## Lifetimes and authorization
 
-Password login and open self-registration create a server session. Access JWTs
+Password login creates a server session. Open self-registration returns the same
+acceptance response for claimed and available addresses without issuing cookies;
+the registration client then performs password login. Access JWTs
 last 15 minutes; refresh JWTs have a rolling seven-day expiry. Both are bounded
 by the session's original 30-day absolute deadline. `JWT_EXPIRES_IN` no longer
 extends access lifetimes. JWT verification requires HS256, JWT header type,

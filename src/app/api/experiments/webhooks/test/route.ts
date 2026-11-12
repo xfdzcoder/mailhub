@@ -1,3 +1,4 @@
+import { protectSensitive } from '@/lib/auth/attempts';
 import { NextRequest } from 'next/server';
 import {
   authenticate,
@@ -7,7 +8,7 @@ import {
 } from '@/lib/auth/middleware';
 import { dispatchWebhookNotification } from '@/lib/notifications';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   const auth = await authenticate(req);
   if (auth instanceof Response) return auth;
   const adminCheck = requireAdmin(auth);
@@ -36,7 +37,9 @@ export async function POST(req: NextRequest) {
     }
 
     return apiResponse({ message: 'Test message sent successfully!', result });
-  } catch (err: any) {
-    return apiError(err.message || 'Failed to send test webhook notification', 500);
+  } catch (err: unknown) {
+    return apiError(err instanceof Error ? err.message : 'Failed to send test webhook notification', 500);
   }
 }
+
+export const POST = protectSensitive('test', handlePOST);

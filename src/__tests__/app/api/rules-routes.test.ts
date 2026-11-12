@@ -1,3 +1,9 @@
+// Endpoint fixtures isolate Redis; distributed policy is exercised separately.
+jest.mock('ioredis', () => class {
+  on() { return this; }
+  async eval() { return 1; }
+  async zrem() { return 1; }
+});
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
   requireAdmin: jest.fn((auth: { role: string }) =>
@@ -53,10 +59,11 @@ import { authenticate } from '@/lib/auth/middleware';
 import { prisma } from '@/lib/db/prisma';
 
 const mockAuthenticate = authenticate as jest.Mock;
-const mockPrismaRule = prisma.emailRule as any;
-const mockPrismaAccount = prisma.emailAccount as any;
-const mockPrismaLabel = prisma.label as any;
-const mockPrismaEmail = prisma.email as any;
+type MockPrismaDelegate = Record<string, jest.Mock>;
+const mockPrismaRule = prisma.emailRule as unknown as MockPrismaDelegate;
+const mockPrismaAccount = prisma.emailAccount as unknown as MockPrismaDelegate;
+const mockPrismaLabel = prisma.label as unknown as MockPrismaDelegate;
+const mockPrismaEmail = prisma.email as unknown as MockPrismaDelegate;
 
 const accountId = '11111111-1111-4111-8111-111111111111';
 const accountLabelId = '22222222-2222-4222-8222-222222222222';

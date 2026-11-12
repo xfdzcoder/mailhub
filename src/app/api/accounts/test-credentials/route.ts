@@ -1,3 +1,4 @@
+import { protectSensitive } from '@/lib/auth/attempts';
 import { NextRequest } from 'next/server';
 import { ImapFlow } from 'imapflow';
 import { createTransport } from 'nodemailer';
@@ -9,7 +10,7 @@ import {
 import { createAccountSchema } from '@/lib/validation/schemas';
 import { resolveSafeOutboundHost } from '@/lib/network/outbound-host';
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
   const auth = await authenticate(req);
   if (auth instanceof Response) return auth;
 
@@ -82,8 +83,10 @@ export async function POST(req: NextRequest) {
 
     const ok = results.imap && results.smtp;
     return apiResponse({ ok, ...results });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Test credentials error:', error);
-    return apiError(error.message || 'Failed to test credentials', 500);
+    return apiError(error instanceof Error ? error.message : 'Failed to test credentials', 500);
   }
 }
+
+export const POST = protectSensitive('test-credentials', handlePOST);

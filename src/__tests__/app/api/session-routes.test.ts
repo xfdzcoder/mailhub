@@ -1,3 +1,9 @@
+// Endpoint fixtures isolate Redis; distributed policy is exercised separately.
+jest.mock('ioredis', () => class {
+  on() { return this; }
+  async eval() { return 1; }
+  async zrem() { return 1; }
+});
 jest.mock('@/lib/auth/sessions', () => ({
   createSession: jest.fn(), rotateSession: jest.fn(), revokeSession: jest.fn(),
   authorizeSession: jest.fn(), changeUserPassword: jest.fn(),
@@ -21,10 +27,11 @@ import { compare, hash } from 'bcryptjs';
 const identity = { userId: '00000000-0000-4000-8000-000000000001', organizationId: '00000000-0000-4000-8000-000000000002', role: 'admin' as const, sessionId: '00000000-0000-4000-8000-000000000003', tokenVersion: 0 };
 const pair = { token: 'synthetic-access', refreshToken: 'synthetic-refresh', expiresAt: new Date(Date.now() + 604800000), accessExpiresAt: new Date(Date.now() + 900000) };
 const request = (path: string, cookie = '', body?: object) => new NextRequest(`http://localhost/api/auth/${path}`, {
-  method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
+  method: 'POST', headers: { cookie, 'Content-Type': 'application/json', origin: 'http://localhost' }, body: body ? JSON.stringify(body) : undefined,
 });
 beforeEach(() => {
   jest.resetAllMocks();
+  process.env.AUTH_TRUSTED_ORIGINS = 'http://localhost';
   process.env.JWT_SECRET = 'synthetic-session-route-secret-for-tests';
   (createSession as jest.Mock).mockResolvedValue(pair);
   (rotateSession as jest.Mock).mockResolvedValue(pair);
@@ -117,4 +124,27 @@ it('revokes bearer-authenticated sessions on logout too', async () => {
   const req = new NextRequest('http://localhost/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer synthetic-access' } });
   expect((await logout(req)).status).toBe(200);
   expect(revokeSession).toHaveBeenCalledWith('synthetic-access', undefined);
+});
+
+it('uses identical external login errors for absent, disabled, wrong-password and membershipless accounts', async () => {
+  const cases = [null, { disabledAt: new Date(), passwordHash: 'synthetic-hash' }, { disabledAt: null, passwordHash: 'synthetic-hash', memberships: [] }];
+  for (const user of cases) {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue(user);
+    const response = await login(request('login', '', validLogin));
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: 'Invalid email or password' });
+  }
+  expect(compare).toHaveBeenCalledTimes(3);
+  expect(createSession).not.toHaveBeenCalled();
+});
+
+it.each([refresh, logout])('rejects cross-origin cookie writes and missing Origin before session work', async handler => {
+  for (const origin of [undefined, 'http://untrusted.localhost', 'null']) {
+    const req = new NextRequest('http://localhost/api/auth/refresh', {
+      method: 'POST', headers: { cookie: 'refresh-token=synthetic-refresh', ...(origin ? { origin, 'sec-fetch-site': 'same-site' } : {}) },
+    });
+    expect((await handler(req)).status).toBe(403);
+  }
+  expect(rotateSession).not.toHaveBeenCalled();
+  expect(revokeSession).not.toHaveBeenCalled();
 });

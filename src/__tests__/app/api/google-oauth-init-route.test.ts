@@ -1,45 +1,27 @@
+// Endpoint fixtures isolate Redis; distributed policy is exercised separately.
+jest.mock('ioredis', () => class {
+  on() { return this; }
+  async eval() { return 1; }
+  async zrem() { return 1; }
+});
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
 }));
+jest.mock('@/lib/oauth/transactions', () => ({ createOAuthTransaction: jest.fn() }));
 
-import type { NextRequest } from 'next/server';
+import { NextRequest } from 'next/server';
 import { GET } from '@/app/api/accounts/oauth/google/init/route';
 import { authenticate } from '@/lib/auth/middleware';
+import { createOAuthTransaction } from '@/lib/oauth/transactions';
 
-const mockAuthenticate = authenticate as jest.Mock;
-
-describe('GET /api/accounts/oauth/google/init', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    process.env.GOOGLE_CLIENT_ID = 'google-client-id';
-    process.env.NEXT_PUBLIC_APP_URL = 'http://localhost';
-  });
-
-  it('normalizes mixed-case mailbox state and login hints before redirecting to Google', async () => {
-    mockAuthenticate.mockResolvedValue({
-      userId: 'member-1',
-      organizationId: 'org-1',
-      role: 'member',
-    });
-
-    const request = {
-      url: 'http://localhost/api/accounts/oauth/google/init?emailAddress=Owner%40Example.com&label=Owner%20Inbox',
-    } as NextRequest;
-
-    const response = await GET(request);
-    const redirectUrl = new URL(response.headers.get('location') ?? '');
-    const state = JSON.parse(
-      Buffer.from(redirectUrl.searchParams.get('state') ?? '', 'base64').toString('utf8')
-    ) as { emailAddress: string; label: string; organizationId: string };
-
-    expect(redirectUrl.origin + redirectUrl.pathname).toBe(
-      'https://accounts.google.com/o/oauth2/v2/auth'
-    );
-    expect(redirectUrl.searchParams.get('login_hint')).toBe('owner@example.com');
-    expect(state).toEqual({
-      emailAddress: 'owner@example.com',
-      label: 'Owner Inbox',
-      organizationId: 'org-1',
-    });
-  });
+it('normalizes the requested mailbox before creating server-side state and login hint', async () => {
+  process.env.GOOGLE_CLIENT_ID = 'synthetic-client';
+  const auth = { sessionId: 'session-1', userId: 'user-1', organizationId: 'org-1', role: 'member' };
+  (authenticate as jest.Mock).mockResolvedValue(auth);
+  (createOAuthTransaction as jest.Mock).mockResolvedValue({ state: 'opaque', challenge: 'challenge', redirectUri: 'https://app.example/api/accounts/oauth/google/callback' });
+  const response = await GET(new NextRequest('https://app.example/api/accounts/oauth/google/init?emailAddress=Owner%40Example.com&label=Owner%20Inbox'));
+  const url = new URL(response.headers.get('location')!);
+  expect(createOAuthTransaction).toHaveBeenCalledWith('google', auth, 'owner@example.com', 'Owner Inbox');
+  expect(url.searchParams.get('login_hint')).toBe('owner@example.com');
+  expect(url.searchParams.get('state')).toBe('opaque');
 });
