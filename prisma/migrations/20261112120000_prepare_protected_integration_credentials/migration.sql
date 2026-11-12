@@ -1,5 +1,7 @@
 -- Storage preparation only: no credential reads, rewrites, defaults or backfill.
 -- NOT VALID avoids scanning legacy rows; checks still enforce new/updated rows.
+BEGIN;
+
 ALTER TABLE "experiment_settings"
     ADD COLUMN "credentials_encrypted" TEXT,
     ADD COLUMN "credentials_format_version" INTEGER,
@@ -21,3 +23,5 @@ ALTER TABLE "notification_webhooks"
             AND "credentials_format_version" IS NOT NULL AND "credentials_format_version" > 0
             AND "credentials_key_version" IS NOT NULL AND length("credentials_key_version") > 0)
     ) NOT VALID;
+
+COMMIT;
