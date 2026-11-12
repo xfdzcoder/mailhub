@@ -59,7 +59,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   try {
     let warning: string | undefined;
-    const MailComposer = require('nodemailer/lib/mail-composer');
+    const { default: MailComposer } = await import('nodemailer/lib/mail-composer');
     const joinAddresses = (json: unknown): string | undefined => {
       if (!Array.isArray(json)) return undefined;
       const addrs = json
@@ -85,17 +85,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       validAttachments.push({ filename: att.filename || 'attachment', contentType: att.contentType || 'application/octet-stream', content });
     }
 
-    const composer = new MailComposer({
+    const composerOptions = {
       from: `"${account.label}" <${account.emailAddress}>`,
       to: joinAddresses(draft.toAddresses),
       cc: joinAddresses(draft.ccAddresses),
       bcc: joinAddresses(draft.bccAddresses),
-      subject: draft.subject,
-      html: draft.body?.bodyHtml,
-      text: draft.body?.bodyText,
+      subject: draft.subject ?? '',
+      html: draft.body?.bodyHtml ?? undefined,
+      text: draft.body?.bodyText ?? undefined,
       attachments: validAttachments.length > 0 ? validAttachments : undefined,
       keepBcc: true,
-    });
+    };
+    const composer = new MailComposer(composerOptions);
     const rawBuffer = await composer.compile().build();
     validateRawOutgoing(rawBuffer);
 
@@ -103,8 +104,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const accessToken = await getValidAccessToken(account.id);
       try {
         await syncDraftRaw(accessToken, rawBuffer);
-      } catch (e: any) {
-        console.error('Failed to sync draft to Gmail:', e.message);
+      } catch (e: unknown) {
+        console.error('Failed to sync draft to Gmail:', e);
         warning = 'Failed to sync draft to Gmail';
       }
     } else {
