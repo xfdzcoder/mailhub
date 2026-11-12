@@ -30,6 +30,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx --no-install prisma generate
+      - run: node --test scripts/ci/security.test.mjs
       - run: npm run lint
       - run: npm test -- --runInBand
       - run: npx tsc --noEmit
@@ -37,12 +38,10 @@ jobs:
 
   image:
     needs: validate
-    if: github.repository == 'xfdzcoder/mailhub' && github.ref == 'refs/heads/dev' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -70,6 +69,65 @@ jobs:
           cache-from: type=gha,scope=mailhub
       - name: Verify migrations, Web and Worker
         run: bash scripts/ci/smoke.sh
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - run: bash scripts/ci/install-scanner.sh
+      - run: bash scripts/ci/scan.sh runtime
+      - run: bash scripts/ci/scan.sh migrate
+        if: success() || failure()
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: image-security-evidence
+          path: security-evidence/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save tested runtime
+        if: github.repository == 'xfdzcoder/mailhub' && github.ref == 'refs/heads/dev' && github.event_name != 'pull_request'
+        run: docker save mailhub-smoke:runtime -o /tmp/runtime.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.repository == 'xfdzcoder/mailhub' && github.ref == 'refs/heads/dev' && github.event_name != 'pull_request'
+        with:
+          name: tested-runtime
+          path: /tmp/runtime.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - run: bash scripts/ci/install-scanner.sh
+      - run: bash scripts/ci/scan.sh source
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: source-security-evidence
+          path: security-evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [validate, dependencies, image]
+    if: github.repository == 'xfdzcoder/mailhub' && github.ref == 'refs/heads/dev' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tested-runtime
+          path: /tmp/tested-runtime
+      - run: docker load -i /tmp/tested-runtime/runtime.tar
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io

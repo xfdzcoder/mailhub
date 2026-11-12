@@ -23,3 +23,6 @@ scripts/
 # Exclude every local env variant, preserving only the public template.
 .env.*
 !.env.example
+
+# Local security evidence is transient.
+/security-evidence/
