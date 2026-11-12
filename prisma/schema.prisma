@@ -418,3 +418,45 @@ model AuthSession {
   @@index([absoluteExpiresAt])
   @@map("auth_sessions")
 }
+
+// Inactive accounting foundation; owner IDs deliberately survive account deletion.
+model StoredAttachmentObject {
+  id String @id @default(uuid()) @db.Uuid
+  storageKey String @unique @map("storage_key")
+  organizationId String? @map("organization_id") @db.Uuid
+  accountId String? @map("account_id") @db.Uuid
+  state String @default("UNMEASURED")
+  measuredBytes BigInt? @map("measured_bytes")
+  observedAt DateTime? @map("observed_at") @db.Timestamptz
+  revision BigInt @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  references StoredAttachmentReference[]
+  reservations AttachmentStorageReservation[]
+  @@index([organizationId, state])
+  @@index([accountId])
+  @@map("stored_attachment_objects")
+}
+
+model StoredAttachmentReference {
+  attachmentId String @id @map("attachment_id") @db.Uuid
+  objectId String @map("object_id") @db.Uuid
+  object StoredAttachmentObject @relation(fields: [objectId], references: [id], onDelete: Restrict)
+  @@index([objectId])
+  @@map("stored_attachment_references")
+}
+
+model AttachmentStorageReservation {
+  id String @id @default(uuid()) @db.Uuid
+  operationKey String @unique @map("operation_key")
+  organizationId String @map("organization_id") @db.Uuid
+  accountId String @map("account_id") @db.Uuid
+  objectId String @map("object_id") @db.Uuid
+  reservedBytes BigInt @map("reserved_bytes")
+  state String @default("RESERVED")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  object StoredAttachmentObject @relation(fields: [objectId], references: [id], onDelete: Restrict)
+  @@index([state, expiresAt])
+  @@index([organizationId, state])
+  @@map("attachment_storage_reservations")
+}
