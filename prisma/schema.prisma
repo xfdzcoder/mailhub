@@ -311,6 +311,11 @@ model ExperimentSetting {
   organizationId String   @unique @map("organization_id") @db.Uuid
   isAiEnabled    Boolean  @default(true) @map("is_ai_enabled")
   
+  // Reserved protected payload; legacy readers/writers continue using plaintext.
+  credentialsEncrypted     String? @map("credentials_encrypted")
+  credentialsFormatVersion Int?    @map("credentials_format_version")
+  credentialsKeyVersion    String? @map("credentials_key_version") @db.VarChar(100)
+
   aiProvider     String   @default("openai") @map("ai_provider") @db.VarChar(50)
   aiApiKey       String?  @map("ai_api_key")
   aiBaseUrl      String?  @map("ai_base_url") @db.VarChar(512)
@@ -331,6 +336,11 @@ model NotificationWebhook {
   name           String   @db.VarChar(100)
   type           String   @db.VarChar(50)
   config         Json
+  // Reserved protected payload; legacy readers/writers continue using plaintext.
+  credentialsEncrypted     String? @map("credentials_encrypted")
+  credentialsFormatVersion Int?    @map("credentials_format_version")
+  credentialsKeyVersion    String? @map("credentials_key_version") @db.VarChar(100)
+
   isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
