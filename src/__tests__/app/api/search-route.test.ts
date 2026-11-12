@@ -4,10 +4,17 @@ jest.mock('@/lib/auth/middleware', () => ({
 
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
-    systemPreference: { upsert: jest.fn() },
-    organizationMember: { findUnique: jest.fn() },
     emailAccount: {
       findMany: jest.fn(),
+    },
+    organizationMember: {
+      findUnique: jest.fn().mockResolvedValue({ semanticSearchEnabled: true }),
+    },
+    systemPreference: {
+      upsert: jest.fn().mockResolvedValue({
+        isAiEnabled: true,
+        semanticSearchEnabled: true,
+      }),
     },
   },
 }));

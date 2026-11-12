@@ -64,7 +64,7 @@ export function setupGlobalFetchInterceptor() {
 function redirectToLogin() {
   if (!window.location.pathname.startsWith('/login')) {
     const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search);
-    window.location.href = `/login?callbackUrl=${callbackUrl}`;
+    window.location.replace(`/login?callbackUrl=${callbackUrl}`);
   }
 }
 

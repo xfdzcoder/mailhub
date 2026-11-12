@@ -1,5 +1,5 @@
 jest.mock('@/lib/network/origin-policy', () => ({ ...jest.requireActual('@/lib/network/origin-policy'), modelPostJson: jest.fn() }));
-import { modelPostJson } from '@/lib/network/origin-policy';
+import { modelPostJson, OutboundTimeoutError } from '@/lib/network/origin-policy';
 jest.mock('@/lib/db/prisma', () => ({ prisma: { systemPreference: { upsert: jest.fn().mockResolvedValue({ isAiEnabled: true }) }, experimentSetting: { findUnique: jest.fn().mockResolvedValue(null) } } }));
 import { generateEmailBatchSummary } from '../../../lib/ai/summary-service';
 
@@ -57,7 +57,8 @@ describe('AI LLM Email Summarization Service', () => {
     expect(modelPostJson).toHaveBeenCalledWith(
       'https://api.openai.com/v1/chat/completions',
       expect.objectContaining({ Authorization: 'Bearer sk-test-key' }),
-      expect.any(String)
+      expect.any(String),
+      { connectMs: 5_000, totalMs: 180_000, responseBytes: 2 * 1024 * 1024 },
     );
   });
 
@@ -85,8 +86,19 @@ describe('AI LLM Email Summarization Service', () => {
     expect(modelPostJson).toHaveBeenCalledWith(
       'https://api.anthropic.com/v1/messages',
       expect.objectContaining({ 'x-api-key': 'claude-key' }),
-      expect.any(String)
+      expect.any(String),
+      { connectMs: 5_000, totalMs: 180_000, responseBytes: 2 * 1024 * 1024 },
     );
+  });
+
+  test('classifies the bounded transport timeout for summary fallback', async () => {
+    (modelPostJson as jest.Mock).mockRejectedValueOnce(new OutboundTimeoutError('Fixture deadline'));
+    await expect(generateEmailBatchSummary({
+      organizationId: 'test-organization-id',
+      provider: 'openai',
+      labelName: 'Fixture',
+      emails: [{ id: 'fixture', subject: 'Fixture message' }],
+    })).rejects.toMatchObject({ name: 'AiUnavailableError', reason: 'timeout' });
   });
 
   test('includes cleaned bodyText in single pass prompt when bodyText is provided', async () => {

@@ -1,5 +1,6 @@
 import { readImapIncoming, IMAP_RESPONSE_LIMITS, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
-import { ImapFlow, FetchMessageObject } from 'imapflow';
+import { ImapFlow, FetchMessageObject, type ImapFlowOptions, type MailboxLockObject, type MailboxObject } from 'imapflow';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
 import { decrypt, encrypt } from '@/lib/crypto';
 import {
@@ -30,7 +31,7 @@ interface ConnectionEntry {
   reconciliationTimer?: NodeJS.Timeout;
   reconciliationInFlight?: boolean;
   reconnectAttempts: number;
-  idleLock?: any;
+  idleLock?: MailboxLockObject;
   idleLoopPromise?: Promise<void>;
   existsHandlerAttached?: boolean;
 }
@@ -89,7 +90,7 @@ export async function resolveImapCredentials(
 
         if (res.ok) {
           const data = await res.json();
-          const updateData: any = {
+          const updateData: Prisma.EmailAccountUpdateInput = {
             oauthAccessToken: encrypt(data.access_token),
             oauthTokenExpiry: new Date(Date.now() + data.expires_in * 1000),
           };
@@ -139,10 +140,10 @@ export async function withImapConnection<T>(
     return null;
   }
 
-  const auth: any = { user: account.username || account.emailAddress };
+      const auth: NonNullable<ImapFlowOptions['auth']> = { user: account.username || account.emailAddress || '' };
   if (accessToken) {
     auth.accessToken = accessToken;
-  } else {
+  } else if (password) {
     auth.pass = password;
   }
 
@@ -323,10 +324,10 @@ export async function moveMessageOn(
 
   const lock = await client.getMailboxLock(sourcePath);
   try {
-    const result: any = await client.messageMove(String(sourceUid), targetPath, { uid: true });
+      const result = await client.messageMove(String(sourceUid), targetPath, { uid: true });
     let newUid: bigint | null = null;
     try {
-      const mapped = result?.uidMap?.get?.(Number(sourceUid));
+      const mapped = result && result.uidMap?.get?.(Number(sourceUid));
       if (mapped !== undefined && mapped !== null) newUid = BigInt(mapped);
     } catch {
       newUid = null;
@@ -423,7 +424,7 @@ function normalizeMessageId(messageId: string): string {
  * Map a server mailbox to one of our normalized folder buckets.
  * Returns null for mailboxes we don't track.
  */
-export function mapSpecialUseToFolder(mailbox: any): string | null {
+export function mapSpecialUseToFolder(mailbox: Pick<MailboxObject, 'specialUse' | 'path'>): string | null {
   const use = (mailbox.specialUse || '').toLowerCase();
   const path = (mailbox.path || '').toLowerCase();
 
@@ -546,7 +547,7 @@ export class IMAPConnectionManager {
             }
 
             if (newAccessToken && newExpiry) {
-              const updateData: any = {
+              const updateData: Prisma.EmailAccountUpdateInput = {
                 oauthAccessToken: encrypt(newAccessToken),
                 oauthTokenExpiry: newExpiry,
               };
@@ -576,7 +577,7 @@ export class IMAPConnectionManager {
 
     const destination = await resolveSafeOutboundHost(account.imapHost);
 
-    const auth: any = {
+    const auth: NonNullable<ImapFlowOptions['auth']> = {
       user: account.username || account.emailAddress,
     };
     if (accessToken) {
@@ -652,11 +653,11 @@ export class IMAPConnectionManager {
       // Start the low-frequency fallback even while the historical sync is
       // pending, so an incomplete backfill cannot leave the account stale.
       this.startReconciliation(account.id, entry);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(`Failed to connect account ${account.id}:`, error);
       entry.isConnected = false;
 
-      const errorMessage = error.message?.toLowerCase() || '';
+      const errorMessage = (error instanceof Error ? error.message : String(error)).toLowerCase();
       const isAuthError = errorMessage.includes('auth') ||
                           errorMessage.includes('login') ||
                           errorMessage.includes('credential');
@@ -665,7 +666,7 @@ export class IMAPConnectionManager {
         try {
           await prisma.emailAccount.update({
             where: { id: account.id },
-            data: { isActive: false, authError: error.message }
+            data: { isActive: false, authError: errorMessage }
           });
           console.log(`Disabled account ${account.id} due to auth error.`);
         } catch (dbError) {
@@ -900,7 +901,7 @@ export class IMAPConnectionManager {
       throw new Error(`Cannot fetch emails: account ${accountId} is not connected.`);
     }
 
-    const { client, organizationId } = entry;
+    const { organizationId } = entry;
     const syncResult: SyncResult = { processed: 0, failed: 0 };
 
     try {
@@ -1362,12 +1363,12 @@ export class IMAPConnectionManager {
       throw new Error(`Cannot sync history: account ${accountId} is not connected.`);
     }
 
-    const { client, organizationId } = entry;
+    const { client } = entry;
     const syncResult: SyncResult = { processed: 0, failed: 0 };
 
     // Release IDLE lock so we can lock other mailboxes during sync
     if (entry.idleLock) {
-      try { entry.idleLock.release(); } catch (e) {}
+      try { entry.idleLock.release(); } catch {}
       entry.idleLock = undefined;
     }
 

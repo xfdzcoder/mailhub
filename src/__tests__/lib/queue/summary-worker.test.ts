@@ -20,7 +20,6 @@ jest.mock('bullmq', () => ({
 
 jest.mock('../../../lib/db/prisma', () => ({
   prisma: {
-    systemPreference: { upsert: jest.fn() },
     organizationMember: { findUnique: jest.fn() },
     emailSummaryRun: {
       findUnique: jest.fn(),
@@ -41,6 +40,12 @@ jest.mock('../../../lib/db/prisma', () => ({
     },
     notificationWebhook: {
       findMany: jest.fn(),
+    },
+    systemPreference: {
+      upsert: jest.fn().mockResolvedValue({
+        isAiEnabled: true,
+        semanticSearchEnabled: true,
+      }),
     },
   },
 }));

@@ -25,7 +25,7 @@ async function handlePOST(req: NextRequest) {
     });
 
     const results = await Promise.allSettled(
-      subscriptions.map((sub: any) => 
+      subscriptions.map((sub) =>
         sendPush({
           endpoint: sub.endpoint,
           keys: {
