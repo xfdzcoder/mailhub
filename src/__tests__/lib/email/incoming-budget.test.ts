@@ -166,3 +166,27 @@ it('releases a stream after a provider or disk read failure', async () => {
   await expect(collectIncoming(source, 1024)).rejects.toMatchObject({ code: 'EIO' });
   expect(source.destroyed).toBe(true);
 });
+
+
+it('handles the IMAP missing-download object without reporting content', async () => {
+  const client = { download: jest.fn().mockResolvedValue({}), close: jest.fn() };
+  await expect(readImapIncoming(client as unknown as ImapFlow, '1', undefined, 10)).resolves.toBeNull();
+});
+
+it('reads complete bounded IMAP content and cleans up the stream', async () => {
+  const content = Readable.from([Buffer.from('hello'), Buffer.from('world')]);
+  const client = { download: jest.fn().mockResolvedValue({ content, meta: {} }) };
+  const result = await readImapIncoming(client as unknown as ImapFlow, '1', undefined, 10);
+  expect(result?.content.toString()).toBe('helloworld');
+  expect(content.destroyed).toBe(true);
+});
+
+it('does not report success for an interrupted IMAP download', async () => {
+  const content = Readable.from((async function* () {
+    yield Buffer.from('partial');
+    throw new Error('temporary disconnect');
+  })());
+  const client = { download: jest.fn().mockResolvedValue({ content, meta: {} }) };
+  await expect(readImapIncoming(client as unknown as ImapFlow, '1', undefined, 100)).rejects.toThrow('temporary disconnect');
+  expect(content.destroyed).toBe(true);
+});

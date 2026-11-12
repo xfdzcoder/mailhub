@@ -103,7 +103,7 @@ export async function readImapIncoming(
   try {
     signal?.throwIfAborted();
     const opening = client.download(uid, part, { uid: true, maxBytes: limit + 1 }).then(download => {
-      if (cancelled) download?.content.destroy();
+      if (cancelled) download?.content?.destroy();
       return download;
     });
     const download = await Promise.race([
@@ -123,7 +123,7 @@ export async function readImapIncoming(
     ]);
     clearTimeout(timer);
     if (onAbort) signal?.removeEventListener('abort', onAbort);
-    if (!download) return null;
+    if (!download?.content) return null;
     const content = await collectIncoming(download.content, limit, undefined, signal);
     return { meta: download.meta, content };
   } finally {
