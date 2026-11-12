@@ -12,7 +12,10 @@
 ## Screenshots & Demo
 
 <div align="center">
-  <img src="public/screenshots/demo.gif" alt="MailHub Animated Demo" width="850" />
+  <img src="public/screenshots/demo.gif" alt="MailHub running locally with synthetic inbox data and compact email actions" width="850" />
+  <br />
+  <img src="public/screenshots/demo-inbox.png" alt="Real MailHub email viewer showing a long subject and synthetic development message" width="1100" />
+  <p><em>Captured from the local development app using fictional demo data. No live mail accounts are connected.</em></p>
 </div>
 
 <br />
@@ -126,6 +129,8 @@ cp .env.example .env
 
 Edit `.env` with your values. Required variables:
 
+For a local synthetic demo, copy `.env.example` to `.env.local` instead and point its service URLs at your own loopback services. Leave the root `.env` absent; when `.env` exists, the app and Prisma use that real configuration and the demo seed refuses to run.
+
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
@@ -167,7 +172,7 @@ System Preferences affects every organization. Access requires both an exact use
 
 An absent, empty, or whitespace-only allowlist denies all instance settings reads and writes. To revoke access, remove the ID and restart the web processes; removing or downgrading the user's active organization membership also blocks access, even with an existing session.
 
-On upgrade, existing organization administrators lose System Preferences access until explicitly provisioned. Existing global values continue to apply, and organization and personal preferences remain saved and accessible under their existing permissions. This policy requires no database migration and grants no roles automatically. The initial `create-admin` command creates an organization administrator only; it does not provision instance access.
+On upgrade, existing organization administrators lose System Preferences access until explicitly provisioned. Existing global values, organization AI preferences, and personal semantic-search preferences continue to apply under their existing permissions. The instance-administrator policy itself grants no roles automatically. Version 0.4.0 removes the personal AI toggle. The initial `create-admin` command creates an organization administrator only; it does not provision instance access.
 
 ### 3. Start Services
 
@@ -191,11 +196,15 @@ npm run create-admin
 npm run create-admin admin@example.com "Admin User" "Password123!" "My Organization"
 ```
 
-To seed test data (optional):
+To seed synthetic demo data into a local development database (optional):
 
 ```bash
 npm run db:seed
 ```
+
+The demo seed is repeatable and only targets a loopback database from `.env.local`. It refuses to run in production, against a non-local database, or while a root `.env` file exists. For demo development, start only the local dependencies with `docker compose up -d postgres redis meilisearch`; do not start the bundled web and worker containers.
+
+Demo login: `admin@demo.mailhub.test` / `DemoPass123!`. The seeded mail accounts are inactive and have no server credentials, so they cannot connect to external mail servers.
 
 ### 5. Run the App
 
@@ -315,7 +324,7 @@ npm test
 
 - **System Installation Check**: Utilizes `navigator.getInstalledRelatedApps()` and display mode media queries (`standalone`, `window-controls-overlay`) to detect if MailHub is installed on the user's OS.
 - **Smart Install UI**: Displays an **Install MailHub App** button in the sidebar for browser tabs; automatically hides when accessed inside the installed PWA app or system.
-- **Icon Generation**: Generated app icon suite available via `node scripts/generate-pwa-icons.js`.
+- **Icon Generation**: Generated app icon suite available via `node scripts/generate-pwa-icons.mjs`.
 
 ## Docker
 
@@ -325,20 +334,20 @@ Pull and run the official pre-built MailHub Docker image directly from Docker Hu
 
 ```bash
 # Pull this release from Docker Hub (`latest` points to the same image)
-docker pull kawing11a/mailhub:0.1.10
+docker pull kawing11a/mailhub:0.4.0
 
 # Run MailHub web container (using your .env file)
 docker run -d \
   --name mailhub-web \
   -p 3000:3000 \
   --env-file .env \
-  kawing11a/mailhub:0.1.10
+  kawing11a/mailhub:0.4.0
 
 # Run background worker container
 docker run -d \
   --name mailhub-worker \
   --env-file .env \
-  kawing11a/mailhub:0.1.10 \
+  kawing11a/mailhub:0.4.0 \
   npm run worker
 ```
 
@@ -352,7 +361,7 @@ docker compose up -d --build
 
 The Dockerfile uses a multi-stage build (`deps` → `build` → `runner`) producing a lean production image. Workers run as separate containers using the same image with `npm run worker` as the entrypoint.
 
-When upgrading an existing deployment, run `npx prisma migrate deploy` before starting the `0.1.10` web and worker containers.
+When upgrading an existing deployment, run `npx prisma migrate deploy` before starting the `0.4.0` web and worker containers.
 
 ## Project Structure
 

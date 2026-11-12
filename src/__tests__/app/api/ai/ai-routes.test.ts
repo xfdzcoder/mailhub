@@ -39,7 +39,7 @@ describe('AI API Routes', () => {
     jest.clearAllMocks();
     (prisma.systemPreference.upsert as jest.Mock).mockResolvedValue({ isAiEnabled: true, semanticSearchEnabled: true });
     (prisma.experimentSetting.findUnique as jest.Mock).mockResolvedValue({ isAiEnabled: true, aiProvider: "openai", aiApiKey: "test-key", aiModelName: "test-model" });
-    (prisma.organizationMember.findUnique as jest.Mock).mockResolvedValue({ personalAiEnabled: true });
+    (prisma.organizationMember.findUnique as jest.Mock).mockResolvedValue({ userId: 'member-1' });
     mockAuthenticate.mockResolvedValue({
       userId: 'member-1',
       organizationId: 'org-1',

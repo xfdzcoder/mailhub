@@ -1,9 +1,88 @@
 # Changelog
 
+## [0.4.0] - 2026-11-11
+
+### Added
+
+- add cross-folder message moves (#34)
+
+
+## [0.3.1] - 2026-11-11
+
+### Fixed
+
+- stabilize email viewer and project checks
+
+### Changed
+
+- Merge branch 'codex/email-viewer-layout-fix'
+
+
+## [0.3.0] - 2026-11-11
+
+### Added
+
+- add opt-in outbound host allowlist
+
+### Changed
+
+- document outbound host allowlist configuration
+- Merge pull request #32 from xfdzcoder/feat/outbound-allowlist
+
+
+## [0.2.0] - 2026-11-11
+
+### Added
+
+- automate versioned multiarch releases
+
+### Fixed
+
+- remove Meilisearch API key from startup logs (#29)
+
+### Changed
+
+- cover spam unread count in account stats (#33)
+- Merge remote-tracking branch 'origin/main'
+- specify main push release workflow
+
+
 All notable changes to **Mailhub** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.13] - 2026-11-09
+
+### Fixed
+- AI email summaries allow up to three minutes per provider request for slower local models.
+- Summary run details now identify whether the local fallback followed a timeout, disabled AI, or unavailable provider.
+
+### Changed
+- Docker Compose and Docker Hub examples now use `kawing11a/mailhub:0.1.13`.
+
+## [0.1.12] - 2026-11-09
+
+### Changed
+- AI email analysis and summary calls now follow the system-wide AI setting; removed the per-member AI preference.
+- Added a dedicated AI Settings page for provider configuration and email summary prompts.
+- Email summaries now follow the configured prompt during both chunk processing and final synthesis.
+- Docker Compose and Docker Hub examples now use `kawing11a/mailhub:0.1.12`.
+
+### Removed
+- Removed the personal AI preference and its database column.
+
+## [0.1.11] - 2026-11-03
+
+### Added
+- Dashboard account and email analytics, with admin-only runtime and queue health widgets.
+
+### Changed
+- Dashboard summaries no longer return or display message-level content.
+- Docker Compose and Docker Hub examples now use `kawing11a/mailhub:0.1.11`.
+
+### Fixed
+- Unread messages in Spam use the same unread row styling as Inbox messages.
 
 ## [0.1.10] - 2026-10-29
 

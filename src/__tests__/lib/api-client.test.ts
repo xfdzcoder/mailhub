@@ -5,7 +5,7 @@ let fetchMock: jest.Mock;
 beforeEach(() => {
   resetFetchInterceptor();
   fetchMock = jest.fn();
-  Object.assign(global, { window: { location: { origin: 'http://localhost', href: '', pathname: '/inbox', search: '' }, fetch: fetchMock } });
+  Object.assign(global, { window: { location: { origin: 'http://localhost', replace: jest.fn(), pathname: '/inbox', search: '' }, fetch: fetchMock } });
   global.fetch = fetchMock;
 });
 afterEach(() => { resetFetchInterceptor(); jest.restoreAllMocks(); });
@@ -50,7 +50,7 @@ it('redirects revoked sessions without trying refresh', async () => {
   setupGlobalFetchInterceptor();
   await window.fetch('/api/emails');
   expect(fetchMock).toHaveBeenCalledTimes(1);
-  expect(window.location.href).toContain('/login?callbackUrl=');
+  expect(window.location.replace).toHaveBeenCalledWith('/login?callbackUrl=%2Finbox');
 });
 it('retries one multi-tab conflict using shared cookies', async () => {
   fetchMock.mockResolvedValueOnce(response(409, 'REFRESH_CONFLICT')).mockResolvedValueOnce(response(200));
@@ -62,19 +62,19 @@ it('stops after a second conflict without forcing login', async () => {
   setupGlobalFetchInterceptor();
   expect((await window.fetch('/api/emails')).status).toBe(401);
   expect(fetchMock).toHaveBeenCalledTimes(3);
-  expect(window.location.href).toBe('');
+  expect(window.location.replace).not.toHaveBeenCalled();
 });
 it.each([503, 500])('leaves transient refresh failure %s recoverable', async status => {
   fetchMock.mockResolvedValueOnce(response(401, 'AUTH_EXPIRED')).mockResolvedValueOnce(response(status));
   setupGlobalFetchInterceptor();
   await window.fetch('/api/emails');
-  expect(window.location.href).toBe('');
+  expect(window.location.replace).not.toHaveBeenCalled();
 });
 it('redirects after definitive refresh rejection', async () => {
   fetchMock.mockResolvedValueOnce(response(401, 'AUTH_EXPIRED')).mockResolvedValueOnce(response(401, 'AUTH_REQUIRED'));
   setupGlobalFetchInterceptor();
   await window.fetch('/api/emails');
-  expect(window.location.href).toContain('/login?callbackUrl=');
+  expect(window.location.replace).toHaveBeenCalledWith('/login?callbackUrl=%2Finbox');
 });
 it('retains a Request body for its one retry', async () => {
   const bodies: string[] = [];
