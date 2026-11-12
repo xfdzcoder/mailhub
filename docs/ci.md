@@ -51,3 +51,12 @@ Node 24 LTS is the supported baseline for both local CI verification and Docker.
 Node 20 has reached end of life; application rollback should preserve a supported
 runtime rather than silently reverting to an unsupported base. The migration
 target and Web/Worker runtime use the same Node major.
+
+## Final image security
+
+CI also calls `image-security.yml` with read permissions to build, smoke-test,
+inventory and scan both final images. The development publication job requires
+this check. See [base-image-security.md](base-image-security.md) for the pinned
+Node/Alpine digest, zlib patch, unresolved upstream npm findings, scanner policy,
+local commands and evidence limitations. No application lockfile changes or
+unreviewed vulnerability exceptions are part of this base-image update.

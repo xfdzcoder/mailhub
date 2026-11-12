@@ -1,5 +1,12 @@
-# Base image
-FROM node:24-alpine AS base
+# Node 24 LTS / Alpine 3.24. Pin the multi-platform index so every target uses
+# the same reviewed npm bundle and OS packages. See docs/base-image-security.md.
+FROM node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS base
+# The pinned image predates Alpine's CVE-2026-4738 fix. Apply it to all targets.
+RUN apk add --no-cache --upgrade zlib=1.4-r0
+# Update the complete supported npm 11 bundle: its dependencies are independent
+# of /app/package-lock.json. glob/minimatch findings remain tracked in the docs.
+RUN npm install --global --ignore-scripts npm@11.21.2 \
+    && npm cache clean --force
 WORKDIR /app
 
 # Dependencies

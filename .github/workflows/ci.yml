@@ -29,14 +29,18 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+      - run: node --test scripts/ci/tests/scan-images.test.mjs
       - run: npx --no-install prisma generate
       - run: npm run lint
       - run: npm test -- --runInBand
       - run: npx tsc --noEmit
       - run: npm run build
 
+  image-security:
+    uses: ./.github/workflows/image-security.yml
+
   image:
-    needs: validate
+    needs: [validate, image-security]
     if: github.repository == 'xfdzcoder/mailhub' && github.ref == 'refs/heads/dev' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
