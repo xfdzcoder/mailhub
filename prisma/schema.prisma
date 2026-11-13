@@ -312,6 +312,11 @@ model ExperimentSetting {
   organizationId String   @unique @map("organization_id") @db.Uuid
   isAiEnabled    Boolean  @default(true) @map("is_ai_enabled")
   
+  // Reserved protected payload; legacy readers/writers continue using plaintext.
+  credentialsEncrypted     String? @map("credentials_encrypted")
+  credentialsFormatVersion Int?    @map("credentials_format_version")
+  credentialsKeyVersion    String? @map("credentials_key_version") @db.VarChar(100)
+
   aiProvider     String   @default("openai") @map("ai_provider") @db.VarChar(50)
   aiApiKey       String?  @map("ai_api_key")
   aiBaseUrl      String?  @map("ai_base_url") @db.VarChar(512)
@@ -332,6 +337,11 @@ model NotificationWebhook {
   name           String   @db.VarChar(100)
   type           String   @db.VarChar(50)
   config         Json
+  // Reserved protected payload; legacy readers/writers continue using plaintext.
+  credentialsEncrypted     String? @map("credentials_encrypted")
+  credentialsFormatVersion Int?    @map("credentials_format_version")
+  credentialsKeyVersion    String? @map("credentials_key_version") @db.VarChar(100)
+
   isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
@@ -442,4 +452,46 @@ model IncomingMailRejection {
   @@unique([accountId, providerMessageId], map: "incoming_rejections_gmail_key")
   @@index([expiresAt])
   @@map("incoming_mail_rejections")
+}
+
+// Inactive accounting foundation; owner IDs deliberately survive account deletion.
+model StoredAttachmentObject {
+  id String @id @default(uuid()) @db.Uuid
+  storageKey String @unique @map("storage_key")
+  organizationId String? @map("organization_id") @db.Uuid
+  accountId String? @map("account_id") @db.Uuid
+  state String @default("UNMEASURED")
+  measuredBytes BigInt? @map("measured_bytes")
+  observedAt DateTime? @map("observed_at") @db.Timestamptz
+  revision BigInt @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  references StoredAttachmentReference[]
+  reservations AttachmentStorageReservation[]
+  @@index([organizationId, state])
+  @@index([accountId])
+  @@map("stored_attachment_objects")
+}
+
+model StoredAttachmentReference {
+  attachmentId String @id @map("attachment_id") @db.Uuid
+  objectId String @map("object_id") @db.Uuid
+  object StoredAttachmentObject @relation(fields: [objectId], references: [id], onDelete: Restrict)
+  @@index([objectId])
+  @@map("stored_attachment_references")
+}
+
+model AttachmentStorageReservation {
+  id String @id @default(uuid()) @db.Uuid
+  operationKey String @unique @map("operation_key")
+  organizationId String @map("organization_id") @db.Uuid
+  accountId String @map("account_id") @db.Uuid
+  objectId String @map("object_id") @db.Uuid
+  reservedBytes BigInt @map("reserved_bytes")
+  state String @default("RESERVED")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  object StoredAttachmentObject @relation(fields: [objectId], references: [id], onDelete: Restrict)
+  @@index([state, expiresAt])
+  @@index([organizationId, state])
+  @@map("attachment_storage_reservations")
 }
