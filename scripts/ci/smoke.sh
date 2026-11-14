@@ -59,6 +59,18 @@ DO $$ BEGIN
   END IF;
 END $$;
 SQL
+# Exercise the rejection contract on both fresh and legacy upgrades, with a
+# real PostgreSQL process restart between writing and reading committed rows.
+for database in mailhub mailhub_upgrade; do
+  "${compose[@]}" exec -T postgres psql -U mailhub -d "$database" -v ON_ERROR_STOP=1 \
+    < scripts/ci/incoming-rejections.sql
+done
+"${compose[@]}" restart postgres
+"${compose[@]}" up -d --wait postgres
+for database in mailhub mailhub_upgrade; do
+  "${compose[@]}" exec -T postgres psql -U mailhub -d "$database" -v ON_ERROR_STOP=1 \
+    < scripts/ci/incoming-rejections-after-restart.sql
+done
 # Startup smoke does not require an embedding server. Disable AI in this disposable DB.
 "${compose[@]}" exec -T postgres psql -U mailhub -d mailhub -v ON_ERROR_STOP=1 -c \
   "INSERT INTO system_preferences (id,is_ai_enabled,semantic_search_enabled) VALUES ('global',false,false) ON CONFLICT (id) DO UPDATE SET is_ai_enabled=false,semantic_search_enabled=false;"
