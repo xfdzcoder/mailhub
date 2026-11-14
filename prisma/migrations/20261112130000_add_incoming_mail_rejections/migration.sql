@@ -1,4 +1,6 @@
 -- Additive only: no mail/account backfill, rewrites, or policy enforcement.
+BEGIN;
+
 CREATE TABLE "incoming_mail_rejections" (
     "id" UUID NOT NULL,
     "account_id" UUID NOT NULL,
@@ -14,7 +16,7 @@ CREATE TABLE "incoming_mail_rejections" (
     "expires_at" TIMESTAMPTZ NOT NULL DEFAULT (CURRENT_TIMESTAMP + interval '30 days'),
     CONSTRAINT "incoming_mail_rejections_pkey" PRIMARY KEY ("id"),
     CONSTRAINT "incoming_rejections_source_check" CHECK (
-      ("provider" = 'imap' AND "mailbox" IS NOT NULL AND length("mailbox") > 0
+      ("provider" = 'imap' AND "mailbox" IS NOT NULL AND octet_length("mailbox") BETWEEN 1 AND 2048
        AND "uid_validity" IS NOT NULL AND "uid_validity" BETWEEN 1 AND 4294967295
        AND "uid" IS NOT NULL AND "uid" BETWEEN 1 AND 4294967295
        AND "provider_message_id" IS NULL)
@@ -42,3 +44,5 @@ CREATE UNIQUE INDEX "incoming_rejections_imap_key"
 CREATE UNIQUE INDEX "incoming_rejections_gmail_key"
   ON "incoming_mail_rejections"("account_id", "provider_message_id");
 CREATE INDEX "incoming_mail_rejections_expires_at_idx" ON "incoming_mail_rejections"("expires_at");
+
+COMMIT;

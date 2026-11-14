@@ -16,7 +16,7 @@ scoped to the authorized account; uniqueness is not an authorization check.
   `inbox`. Preserve case and server namespace; normalize only the protocol's
   case-insensitive INBOX spelling to `INBOX`. UIDVALIDITY and UID are positive
   unsigned 32-bit values stored as BigInt. Never substitute zero, omit
-  UIDVALIDITY, or use a Message-ID header. A changed UIDVALIDITY is a new source.
+  UIDVALIDITY, or use a Message-ID header. A changed UIDVALIDITY is a new source. The locator is bounded to 1024 characters and 2048 UTF-8 bytes so it fits the unique index. If the selected server path exceeds this contract, treat the source identity as unavailable and preserve sync retry semantics.
 - Gmail identity is `(accountId, providerMessageId)`, using the opaque Gmail
   message ID, not its thread ID or RFC Message-ID. Labels are not identity.
 - The migration checks that exactly one provider shape is present and uses

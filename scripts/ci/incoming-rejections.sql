@@ -44,6 +44,10 @@ VALUES ('56000000-0000-4000-8000-000000000099','56000000-0000-4000-8000-00000000
 ON CONFLICT (account_id,provider_message_id) DO NOTHING;
 
 DO $$ BEGIN
+ BEGIN
+   UPDATE incoming_mail_rejections SET mailbox = repeat('界', 683) WHERE provider = 'imap';
+   RAISE EXCEPTION 'Mailbox above the indexed byte limit accepted';
+ EXCEPTION WHEN check_violation THEN NULL; END;
  IF (SELECT count(*) FROM incoming_mail_rejections) <> 8 THEN
    RAISE EXCEPTION 'Source uniqueness/idempotency failed'; END IF;
  BEGIN
