@@ -96,6 +96,7 @@ model EmailAccount {
 
   organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   owner          OrganizationMember @relation("EmailAccountOwner", fields: [organizationId, ownerUserId], references: [organizationId, userId], onDelete: Restrict)
+  incomingMailRejections IncomingMailRejection[]
   emails         Email[]
   accountLabels  AccountLabel[]
   activityLogs   EmailActivityLog[]
@@ -427,6 +428,30 @@ model AuthSession {
   @@index([familyId])
   @@index([absoluteExpiresAt])
   @@map("auth_sessions")
+}
+
+// Persistence contract only; sync/policy adoption belongs to #50.
+// Provider shape, reason allowlist and retention checks live in the SQL migration.
+model IncomingMailRejection {
+  id                String   @id @default(uuid()) @db.Uuid
+  accountId         String   @map("account_id") @db.Uuid
+  provider          String   @db.VarChar(10)
+  mailbox           String?  @db.VarChar(1024)
+  uidValidity       BigInt?  @map("uid_validity")
+  uid               BigInt?
+  providerMessageId String?  @map("provider_message_id") @db.VarChar(512)
+  reasonCode        String   @map("reason_code") @db.VarChar(32)
+  policyVersion     Int      @map("policy_version")
+  firstRejectedAt   DateTime @default(now()) @map("first_rejected_at") @db.Timestamptz
+  lastRejectedAt    DateTime @default(now()) @map("last_rejected_at") @db.Timestamptz
+  expiresAt         DateTime @default(dbgenerated("(CURRENT_TIMESTAMP + interval '30 days')")) @map("expires_at") @db.Timestamptz
+
+  account EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, mailbox, uidValidity, uid], map: "incoming_rejections_imap_key")
+  @@unique([accountId, providerMessageId], map: "incoming_rejections_gmail_key")
+  @@index([expiresAt])
+  @@map("incoming_mail_rejections")
 }
 
 // Inactive accounting foundation; owner IDs deliberately survive account deletion.
