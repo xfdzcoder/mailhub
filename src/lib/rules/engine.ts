@@ -438,8 +438,11 @@ export async function processRulesForNewEmail(
         };
         const owner = await accountWorkOwner(accountId);
         await withWork(owner, async () => {
-          if (!await claimSend(owner, accountId, forwardInput)) return;
-          await sendEmail(accountId, forwardInput);
+          const operation = await claimSend(owner, accountId, `rule-forward:${emailId}`, forwardInput);
+          try {
+            const result = await sendEmail(accountId, forwardInput, operation.beforeDelivery);
+            await operation.delivered(result.messageId);
+          } catch (error) { await operation.failedBeforeDelivery(error); throw error; }
         }, Buffer.byteLength(JSON.stringify(forwardInput)));
 
         console.log(`[EmailRule] Forwarded email ${emailId} to ${combinedActions.forwardTo.join(', ')}`);

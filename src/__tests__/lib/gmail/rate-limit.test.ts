@@ -89,10 +89,14 @@ describe('Gmail API rate-limit handling', () => {
       0
     );
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
     resolveFirst(new Response('first', { status: 200 }));
     await first;
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
@@ -102,4 +106,15 @@ describe('Gmail API rate-limit handling', () => {
 
     jest.useRealTimers();
   });
+});
+
+
+test('Gmail delivery never automatically retries an uncertain provider response', async () => {
+  const { sendMessageRaw } = await import('@/lib/gmail/api');
+  const fetch = jest.spyOn(global, 'fetch').mockResolvedValue(new Response('{}', { status: 503 }));
+  fetch.mockClear();
+  try {
+    await expect(sendMessageRaw('synthetic-token', Buffer.from('synthetic'))).rejects.toThrow('Failed to send');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  } finally { fetch.mockRestore(); }
 });

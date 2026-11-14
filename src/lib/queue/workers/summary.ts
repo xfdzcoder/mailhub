@@ -1,3 +1,4 @@
+import { assertWorkLease } from '@/lib/workload/admission';
 import { processAdmitted } from '@/lib/workload/processor';
 import { Worker, Job } from 'bullmq';
 import Redis from 'ioredis';
@@ -293,6 +294,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
     let usedFallback = !aiEnabled;
     if (aiEnabled) {
       try {
+        await assertWorkLease();
         summaryText = await generateEmailBatchSummary({
           organizationId,
           provider,
@@ -359,6 +361,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
         );
 
         for (const webhook of webhooks) {
+          await assertWorkLease();
           const dispatchRes = await dispatchWebhookNotification({
             type: webhook.type as any,
             config: webhook.config,

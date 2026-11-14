@@ -1,4 +1,4 @@
-jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run() }));
+jest.mock('@/lib/workload/admission', () => ({ withoutWorkLease: (run: () => unknown) => run(), assertWorkLease: async () => {}, workSignal: () => undefined, withWork: async (_owner: unknown, run: () => Promise<unknown>) => run() }));
 jest.mock('@/lib/workload/ownership', () => ({ accountWorkOwner: async () => ({ userId: 'user-1', organizationId: 'org-1' }) }));
 jest.mock('@/lib/notifications/push', () => ({ sendPush: jest.fn(), reportPushFailure: jest.fn() }));
 jest.mock('@/lib/db/prisma', () => ({

@@ -1,3 +1,4 @@
+import { assertWorkLease } from '@/lib/workload/admission';
 import { withWork } from '@/lib/workload/admission';
 import { accountWorkOwner } from '@/lib/workload/ownership';
 import { sendPush, reportPushFailure } from './push';
@@ -46,6 +47,7 @@ export async function sendAccountPushNotification(
     });
 
     for (const subscription of subscriptions) {
+      await assertWorkLease();
       await sendPush(
             {
               endpoint: subscription.endpoint,

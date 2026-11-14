@@ -1,6 +1,6 @@
 import { Queue, type JobsOptions } from 'bullmq';
 import { createHash } from 'node:crypto';
-import { AdmissionError, admissionLimits, reserve } from './admission';
+import { AdmissionError, admissionLimits, reserve, assertWorkLease } from './admission';
 import { jobWorkOwner } from './ownership';
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -16,6 +16,7 @@ export class AdmittedQueue extends Queue {
   }
 
   override async add(name: string, data: Record<string, unknown>, opts: JobsOptions = {}) {
+    await assertWorkLease();
     const owner = await jobWorkOwner(this.name, data);
     const jobId = opts.jobId || digest(`${name}:${JSON.stringify(data)}`);
     const bytes = Buffer.byteLength(JSON.stringify(data));
@@ -23,6 +24,7 @@ export class AdmittedQueue extends Queue {
     if (bytes > admissionLimits.unitBytes) throw new AdmissionError();
     await reserve(owner, 'queued', reservationId(this.name, jobId), bytes);
     try {
+      await assertWorkLease();
       return await super.add(name, data, {
         ...opts, jobId,
         attempts: this.name === 'email-summary' || this.name === 'email-send' ? 1 : 3,

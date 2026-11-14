@@ -1,3 +1,4 @@
+import { assertWorkLease } from '@/lib/workload/admission';
 import { processAdmitted } from '@/lib/workload/processor';
 import { Worker, Job } from 'bullmq';
 import Redis from 'ioredis';
@@ -59,6 +60,7 @@ export const searchWorker = new Worker<SearchIndexPayload>(
     };
 
     // Index into Meilisearch
+    await assertWorkLease();
     await meilisearch.index('emails').addDocuments([document], { primaryKey: 'id' });
     
     console.log(`Indexed email ${emailId} in Meilisearch.`);

@@ -1,3 +1,4 @@
+import { assertWorkLease, workSignal } from '@/lib/workload/admission';
 import { decrypt, encrypt } from '@/lib/crypto';
 import { prisma } from '@/lib/db/prisma';
 import { getGmailRequestKey, withGmailRateLimit } from './rate-limit';
@@ -21,7 +22,8 @@ export async function gmailFetch(url: string | URL, options?: RequestInit, maxRe
     const maxBackoff = 32000;
 
     while (true) {
-      const res = await fetch(url.toString(), options);
+      await assertWorkLease();
+      const res = await fetch(url.toString(), { ...options, signal: options?.signal || workSignal() });
       const quotaError = await isQuotaErrorResponse(res);
 
       // Gmail can report user/project rate limits as 403 as well as 429.
@@ -339,7 +341,7 @@ export async function sendMessageRaw(
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({ raw: base64Str }),
-  });
+  }, 0);
 
   if (!res.ok) {
     const err = await res.json().catch(() => null);

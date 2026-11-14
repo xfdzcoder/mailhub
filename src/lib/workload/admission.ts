@@ -1,4 +1,5 @@
 import Redis from 'ioredis';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 
 export interface WorkOwner { userId: string; organizationId: string }
@@ -111,23 +112,46 @@ export async function reserve(owner: WorkOwner, stage: 'queued' | 'active', id: 
   };
 }
 
+const workContext = new AsyncLocalStorage<{ check: () => Promise<void>; signal: AbortSignal }>();
+/** Call immediately before each external effect, and before transaction commit. */
+export async function assertWorkLease(): Promise<void> { await workContext.getStore()?.check(); }
+export function withoutWorkLease<T>(run: () => T): T { return workContext.exit(run); }
+export function workSignal(): AbortSignal | undefined { return workContext.getStore()?.signal; }
+
 export async function withWork<T>(owner: WorkOwner, run: () => Promise<T>, bytes = 0, activeOnly = false, lane?: string): Promise<T> {
+  const parent = workContext.getStore();
+  await parent?.check();
   const queued = activeOnly ? undefined : await reserve(owner, 'queued', randomUUID(), bytes);
   let active: Awaited<ReturnType<typeof reserve>> | undefined;
   let timer: NodeJS.Timeout | undefined;
-  let lost = false;
+  const controller = new AbortController();
+  let closed = false;
+  let checking: Promise<void> | undefined;
+  const lose = () => { controller.abort(); };
+  const check = async () => {
+    if (closed || controller.signal.aborted) throw new AdmissionError(true);
+    checking ??= (async () => {
+      try { await parent?.check(); await active!.renew(); await queued?.renew(); }
+      catch { lose(); throw new AdmissionError(true); }
+    })().finally(() => { checking = undefined; });
+    await checking;
+    if (closed || controller.signal.aborted) throw new AdmissionError(true);
+  };
   try {
     active = await reserve(owner, 'active', randomUUID(), 0, lane);
-    timer = setInterval(() => {
-      void active!.renew().catch(() => { lost = true; });
-    }, Math.max(100, Math.floor(admissionLimits.activeMs / 3)));
+    timer = setInterval(() => { void check().catch(lose); }, Math.max(10, Math.floor(admissionLimits.activeMs / 3)));
     timer.unref();
-    const result = await run();
-    if (lost) throw new AdmissionError(true);
-    return result;
+    return await workContext.run({ check, signal: controller.signal }, async () => {
+      await check();
+      const result = await run();
+      await check();
+      return result;
+    });
   } finally {
+    closed = true;
+    lose();
     if (timer) clearInterval(timer);
-    // Failure to release is conservative: leases recover through expiry.
+    await checking?.catch(() => {});
     await active?.release().catch(() => {});
     await queued?.release().catch(() => {});
   }

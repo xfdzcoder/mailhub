@@ -504,9 +504,12 @@ export function ComposeModal() {
         throw new Error('Draft was not saved to the selected From account');
       }
 
+      const operationStorageKey = `mailhub:send:${fromAccount.id}:${identity.draftId}`;
+      const operationId = sessionStorage.getItem(operationStorageKey) || crypto.randomUUID();
+      sessionStorage.setItem(operationStorageKey, operationId);
       const res = await fetch(`/api/accounts/${fromAccount.id}/emails/send`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': operationId },
         body: JSON.stringify({
           draftId: identity.draftId,
           to: toList,

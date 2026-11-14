@@ -1,5 +1,13 @@
-jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(), AdmissionError: class extends Error {} }));
-jest.mock('@/lib/workload/send-once', () => ({ claimSend: async () => true }));
+jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(), assertWorkLease: async () => {}, AdmissionError: class extends Error {} }));
+jest.mock('@/lib/email/attachment-accounting', () => ({
+  storageKey: (filename: string) => filename,
+  reserveAttachment: jest.fn(async () => ({ id: 'reservation' })),
+  publishAttachment: async (_reservation: unknown, publish: () => Promise<void>) => publish(),
+  commitAttachment: async () => {}, releaseAttachment: async () => {},
+  cleanupAttachment: async (_reservation: unknown, filename: string) => { await (await import('fs/promises')).unlink(filename); },
+  cleanupReplacedAttachment: async (filename: string) => { if (await (await import('@/lib/db/prisma')).prisma.attachment.count({ where: { storagePath: filename } }) === 0) await (await import('fs/promises')).unlink(filename); },
+}));
+jest.mock('@/lib/workload/send-once', () => ({ claimSend: async () => ({ beforeDelivery: async () => {}, delivered: async () => {}, failedBeforeDelivery: async () => {} }), SendReplayError: class extends Error {} }));
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
   apiResponse: (data: unknown, status = 200) =>
@@ -31,9 +39,11 @@ jest.mock('@/lib/activity/log', () => ({
   logActivity: jest.fn(),
 }));
 
-jest.mock('fs/promises', () => ({
+jest.mock('fs/promises', () => ({ lstat: jest.fn(async () => ({ isSymbolicLink: () => false })), realpath: jest.fn(async (filename: string) => filename),
+  link: jest.fn().mockResolvedValue(undefined),
   mkdir: jest.fn(),
   writeFile: jest.fn(),
+  unlink: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('crypto', () => ({
@@ -70,10 +80,12 @@ function createRequest(
           sizeBytes?: number;
         }>
       | undefined;
-  }> = {}
+  }> = {},
+  signal?: AbortSignal,
 ): NextRequest {
   return new Request('http://localhost/api/accounts/account-1/emails/send', {
     method: 'POST',
+    signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       to: ['recipient@example.com'],
@@ -88,6 +100,7 @@ function createRequest(
 describe('POST sent email', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    prisma.$transaction = jest.fn(async (callback) => callback(prisma)) as unknown as typeof prisma.$transaction;
     mockAuthenticate.mockResolvedValue({
       userId: 'user-1',
       organizationId: 'org-1',
@@ -103,6 +116,19 @@ describe('POST sent email', () => {
     mockLogActivity.mockResolvedValue(undefined);
     mockMkdir.mockResolvedValue(undefined);
     mockWriteFile.mockResolvedValue(undefined);
+  });
+
+  it('cleans staged files and skips delivery when the request aborts during a write', async () => {
+    const abort = new AbortController();
+    mockWriteFile.mockImplementationOnce(async () => { abort.abort(); });
+    const request = createRequest({
+      attachments: [{ filename: 'fixture.txt', contentType: 'text/plain', content: 'YWJj' }],
+    }, abort.signal);
+    const response = await POST(request, { params: Promise.resolve({ id: 'account-1' }) });
+    expect(response.status).toBe(400);
+    expect(fs.unlink).toHaveBeenCalledWith(mockWriteFile.mock.calls[0][0]);
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it('stores one provider-confirmed time as sentAt and receivedAt', async () => {
@@ -151,6 +177,7 @@ describe('POST sent email', () => {
     expect(mockCreateEmail.mock.calls[0][0].data.snippet).toHaveLength(300);
 
     jest.clearAllMocks();
+    prisma.$transaction = jest.fn(async (callback) => callback(prisma)) as unknown as typeof prisma.$transaction;
     mockAuthenticate.mockResolvedValue({
       userId: 'user-1',
       organizationId: 'org-1',
@@ -183,6 +210,30 @@ describe('POST sent email', () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it('rejects malformed attachments before writes or delivery', async () => {
+    const response = await POST(createRequest({ attachments: [{ filename: 'x', contentType: 'text/plain', content: 'Zh==' }] }), { params: Promise.resolve({ id: 'account-1' }) });
+    expect(response.status).toBe(422);
+    expect(mockWriteFile).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('cleans files and does not deliver after disk failure', async () => {
+    mockWriteFile.mockRejectedValueOnce(new Error('disk full'));
+    const response = await POST(createRequest({ attachments: [{ filename: 'x', contentType: 'text/plain', content: 'YWJj' }] }), { params: Promise.resolve({ id: 'account-1' }) });
+    expect(response.status).toBe(502);
+    expect(fs.unlink).toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockCreateEmail).not.toHaveBeenCalled();
+  });
+
+  it('reports confirmed delivery after local write failure without resending', async () => {
+    mockSendEmail.mockResolvedValue({ messageId: '<delivered@example.test>' });
+    mockCreateEmail.mockRejectedValueOnce(new Error('database unavailable'));
+    const response = await POST(createRequest(), { params: Promise.resolve({ id: 'account-1' }) });
+    expect(await response.json()).toMatchObject({ success: true, messageId: '<delivered@example.test>', warning: expect.stringContaining('Do not resend') });
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+  });
+
   it('stores sent attachments on local storage paths and keeps provider reference fields unset', async () => {
     mockSendEmail.mockResolvedValue({ messageId: '<attachment@example.com>' });
 
@@ -205,7 +256,8 @@ describe('POST sent email', () => {
     expect(mockMkdir).toHaveBeenCalled();
     expect(mockWriteFile).toHaveBeenCalledWith(
       expect.stringContaining('.storage'),
-      Buffer.from('pdf')
+      Buffer.from('pdf'),
+      { flag: 'wx' }
     );
     expect(mockCreateAttachment).toHaveBeenCalledWith({
       data: expect.objectContaining({

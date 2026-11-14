@@ -173,7 +173,7 @@ describe('sendEmail sender', () => {
 
   it('sends email using standard password SMTP for IMAP accounts', async () => {
     const mockSendMail = jest.fn().mockResolvedValue({ messageId: '<smtp-msg-456>' });
-    mockCreateTransport.mockReturnValue({ sendMail: mockSendMail });
+    mockCreateTransport.mockReturnValue({ close: jest.fn(), sendMail: mockSendMail });
 
     mockGetDecryptedAccount.mockResolvedValue({
       id: 'acc-imap-1',
@@ -193,6 +193,7 @@ describe('sendEmail sender', () => {
     });
 
     expect(mockCreateTransport).toHaveBeenCalledWith({
+      connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 30000,
       host: '93.184.216.34',
       port: 465,
       secure: true,
@@ -213,7 +214,7 @@ describe('sendEmail sender', () => {
 
   it('passes bcc recipients correctly to SMTP transporter when specified', async () => {
     const mockSendMail = jest.fn().mockResolvedValue({ messageId: '<smtp-bcc-789>' });
-    mockCreateTransport.mockReturnValue({ sendMail: mockSendMail });
+    mockCreateTransport.mockReturnValue({ close: jest.fn(), sendMail: mockSendMail });
 
     mockGetDecryptedAccount.mockResolvedValue({
       id: 'acc-imap-1',

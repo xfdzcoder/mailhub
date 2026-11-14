@@ -1,11 +1,13 @@
-# Blocking follow-up: durable storage accounting migration
+# Durable attachment accounting adoption
 
-Issue #47's work reservations do not bound durable storage. Do not roll this slice out as a complete durable-storage quota implementation.
+The #61 foundation is now available on dev. This continuation adopts its contract
+for outgoing send/draft writers and reconciliation. See
+[the accounting contract](../attachment-accounting.md) and
+[follow-up behavior and isolated validation](follow-up-validation.md).
 
-Current inventory: sent messages and drafts write UUID-named files to `.storage/attachments`, then insert Attachment rows. Draft updates delete rows but leave files. Deleting emails/accounts cascades metadata without unlinking files. A crash between write and insert leaves an orphan. `sizeBytes` is nullable and historically accepted caller estimates. Incoming Gmail/IMAP sync now stores lazy provider references with no local bytes; legacy received messages may have storagePath, including missing files. `reconcileAttachmentFiles` can recreate legacy files. Retrieval reads stored files or provider data without caching new files. EmailBody, database indexes, WAL, search embeddings, and Redis/Bull retention are additional persistent storage, not covered by attachment byte accounting.
-
-A separately reviewed additive migration is required before claiming durable attachment quotas: tenant storage usage/limits and durable reservations, with principal and organization ownership, actual byte count, unique write identity, state (reserved/written/linked/deleting), and reconciliation cursor. Reserve transactionally before every draft/send/legacy repair write; count reserved and committed bytes against both owner and organization budgets. Reserve before SMTP so quota denial never follows successful delivery. After a file is fsynced, link the attachment and convert its reservation in a database transaction. Preserve reservations across crashes; only release after verified file deletion. Moving drafts across accounts must transfer or conservatively charge both owners transactionally. Never trust client attachment IDs or size estimates.
-
-Rollout requires a maintenance inventory of the *configured* storage volume and paginated Attachment metadata. Stat files, compare actual length to recorded size, classify missing metadata/files and paths outside the approved root, and charge unknown/orphan bytes to a global quarantine budget. Unknown ownership or incomplete inventory must fail closed for new durable writes. Do not automatically delete, move, rewrite ownership, or credit missing/orphan data. Concurrent inventory needs a write journal/cutover barrier; a one-time SUM(sizeBytes) cannot establish the boundary. Redis loss must rebuild from this durable ledger, never initialize storage usage to zero.
-
-No migration, storage scan, deletion, production ownership rewrite, volume change, or deployed configuration change is included here. This is an explicit remaining blocker for the storage acceptance criterion, not a claim that request limits solve it.
+Existing volumes must be inventoried until stable before new writes are admitted.
+Unknown ownership, orphan/error observations and incomplete inventory fail closed.
+Accounting evidence survives account/email deletion; expiry never authorizes file
+deletion. These budgets cover local attachment bytes only. Database/search/WAL
+storage and remaining interactive admission coverage are outside this follow-up.
+Keep PR #49 draft pending manual dev integration and review.

@@ -4,8 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Queue, Worker } from 'bullmq';
-import { RESERVE, RELEASE, RENEW, budgetKeys, admissionRedis, reserve, withWork, AdmissionError } from '@/lib/workload/admission';
-import { CLAIM_SEND } from '@/lib/workload/send-once';
+import { RESERVE, RELEASE, RENEW, budgetKeys, admissionRedis, reserve, withWork, assertWorkLease, withoutWorkLease, AdmissionError } from '@/lib/workload/admission';
 import { AdmittedQueue } from '@/lib/workload/queue';
 import { processAdmitted } from '@/lib/workload/processor';
 
@@ -100,14 +99,41 @@ integration('distributed workload admission with disposable Redis', () => {
     const lease = await reserve(ownerB, 'active');
     await lease.release();
   }, 10000);
-  test('send claim survives failures/partial acceptance and has a finite tenant cap', async () => {
-    const key = 'work:{admission}:send:fixture';
-    const results = await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).eval(CLAIM_SEND, 1, key, 'same-delivery', 2)));
-    expect(results.filter(value => value === 1)).toHaveLength(1);
-    expect(results.filter(value => value === 2)).toHaveLength(19);
-    expect(await b.eval(CLAIM_SEND, 1, key, 'second', 2)).toBe(1);
-    expect(await b.eval(CLAIM_SEND, 1, key, 'third', 2)).toBe(0);
-    expect(await a.ttl(key)).toBeGreaterThan(7 * 86400);
+  test('lease loss permanently halts later side effects and releases idempotently', async () => {
+    let effects = 0;
+    await expect(withWork(ownerA, async () => {
+      await assertWorkLease();
+      effects++;
+      await a.del(...keysA); // simulate lost ownership between effects
+      await expect(assertWorkLease()).rejects.toBeInstanceOf(AdmissionError);
+      // Even if Redis is healthy again, this invocation cannot recover ownership.
+      await assertWorkLease();
+      effects++;
+    })).rejects.toBeInstanceOf(AdmissionError);
+    expect(effects).toBe(1);
+    expect(await a.zcard(budgetKeys(ownerA, 'queued')[0])).toBe(0);
+    expect(await a.zcard(keysA[2])).toBe(0);
+    await expect(withWork(ownerB, async () => {
+      const keys = budgetKeys(ownerB, 'active');
+      const [member] = await a.zrange(keys[0], 0, 0);
+      for (const key of keys) await a.zadd(key, 0, member); // expired, still physically present
+      await assertWorkLease();
+      effects++;
+    })).rejects.toBeInstanceOf(AdmissionError);
+    expect(effects).toBe(1);
+  });
+  test('trusted periodic work gets fresh admission after the scheduling scope closes', async () => {
+    let complete!: () => void;
+    let fail!: (error: unknown) => void;
+    const later = new Promise<void>((resolve, reject) => { complete = resolve; fail = reject; });
+    let effects = 0;
+    await withWork(ownerA, async () => {
+      withoutWorkLease(() => setTimeout(() => {
+        void withWork(ownerA, async () => { await assertWorkLease(); effects++; }).then(complete, fail);
+      }, 10));
+    });
+    await later;
+    expect(effects).toBe(1);
   });
   test('legacy retry options cannot amplify failed work beyond three attempts', async () => {
     const connectionA = new Redis(socket, { maxRetriesPerRequest: null });

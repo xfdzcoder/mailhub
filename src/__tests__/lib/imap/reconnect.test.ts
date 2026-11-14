@@ -1,5 +1,5 @@
 // These fixtures exercise mailbox behavior; admission has isolated Redis integration coverage.
-jest.mock('@/lib/workload/admission', () => ({
+jest.mock('@/lib/workload/admission', () => ({ withoutWorkLease: (run: () => unknown) => run(), assertWorkLease: async () => {}, workSignal: () => undefined,
   withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(),
   AdmissionError: class extends Error {},
 }));

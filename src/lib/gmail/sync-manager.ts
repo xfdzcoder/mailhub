@@ -1,3 +1,4 @@
+import { assertWorkLease, withoutWorkLease } from '@/lib/workload/admission';
 import { withWork } from '@/lib/workload/admission';
 import { accountWorkOwner } from '@/lib/workload/ownership';
 import { prisma } from '@/lib/db/prisma';
@@ -76,11 +77,11 @@ export class GmailSyncManager {
 
     console.log(`Initializing Gmail polling for account ${account.id}`);
 
-    const interval = setInterval(() => {
+    const interval = withoutWorkLease(() => setInterval(() => {
       this.pollNewEmails(account.id, account.organizationId).catch((err) => {
         console.error(`Gmail polling error for account ${account.id}:`, err);
       });
-    }, runtimeConfig.gmailPollIntervalMs);
+    }, runtimeConfig.gmailPollIntervalMs));
 
     this.pollingIntervals.set(account.id, interval);
   }
@@ -111,6 +112,7 @@ export class GmailSyncManager {
       for (const { labelId, folder } of folders) {
         let pageToken: string | undefined = undefined;
         do {
+          await assertWorkLease();
           const result = await fetchMessagesList(accessToken, {
             labelIds: [labelId],
             maxResults: 50,
@@ -187,6 +189,7 @@ export class GmailSyncManager {
       ]) {
         let pageToken: string | undefined;
         do {
+          await assertWorkLease();
           const result = await fetchMessagesList(accessToken, {
             labelIds: [labelId],
             maxResults: 50,
@@ -263,7 +266,9 @@ export class GmailSyncManager {
         return true;
       }
 
+      await assertWorkLease();
       const fullMessage = await fetchMessageFull(accessToken, gmailMessageId);
+      await assertWorkLease();
       const rawBuffer = await fetchMessageRaw(accessToken, gmailMessageId);
       const parsed = await parseEmail(rawBuffer);
 
@@ -444,6 +449,7 @@ export class GmailSyncManager {
           },
         });
 
+        await assertWorkLease();
         return email;
       }, { maxWait: 10_000, timeout: 30_000 }));
 
