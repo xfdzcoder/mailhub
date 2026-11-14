@@ -136,3 +136,48 @@ checks; that file passed all 21 tests in isolation, and the full rerun passed.
 Production build completed; it emitted Redis connection-refused messages because
 Redis was not running. Schema validation passed. This storage-only change has no
 visible UI change, so no visual preview was generated.
+
+## Runtime protection (#27)
+
+Configure `INTEGRATION_CREDENTIAL_KEYS` as a JSON object of opaque key IDs to
+base64-encoded 32-byte keys, and `INTEGRATION_CREDENTIAL_ACTIVE_KEY` as the writer
+key ID. This registry is separate from mail-account encryption. Readers use each
+row's recorded key and reject partial tuples, unknown versions, missing keys and
+authentication failures. Only an entirely absent tuple permits legacy reads.
+Settings mutations dual-write source and protected data atomically; retain legacy
+columns for rollback/reconciliation. The guard migration rejects old credential
+writers on populated rows unless they also replace ciphertext. Deploy it before
+backfill. Settings responses contain presence flags only, with no partial key,
+endpoint, webhook config or protected storage metadata.
+
+The explicit operator tool is `npx tsx scripts/backfill-integration-credentials.ts`.
+It requires `INTEGRATION_BACKFILL_DATABASE_URL`, `INTEGRATION_BACKFILL_CHECKPOINT`,
+and `INTEGRATION_BACKFILL_COORDINATED=yes`, plus the key registry. Never point it
+at production without separate operator review. It checks the guard migration,
+database identity and encryption round trip, pins the checkpoint key, authenticates
+populated rows, and uses exact JSONB row snapshots for CAS. Each invocation reads
+at most 100 rows per batch and 1,000 per invocation, stopping between batches after
+30 seconds. Checkpoints contain IDs and counts, never credentials. Re-run with the
+same checkpoint to resume. After completion start a fresh checkpoint for a full
+reconciliation pass, including inserts below the prior cursor and CAS conflicts.
+Completion of one pass does not prove convergence. Do not cut over deployments
+until a full reconciliation has zero conflicts/missing/mismatched rows. Rotation,
+legacy-column removal and production backfill remain separate operator actions.
+
+Validation for #27 used Node 24.22.3 and a new disposable PostgreSQL cluster on
+loopback port 55427, with generated synthetic rows only. The runtime integration
+check (`scripts/ci/integration-credentials-runtime.mjs`, using the same explicit
+`CREDENTIAL_STORAGE_TEST_SERVER_URL` as the storage check) verifies a 1,003-row
+bounded pass, checkpoint resume, full reconciliation, ciphertext preservation,
+old-writer rejection, checkpoint key mismatch and corrupted ciphertext rejection.
+The existing fresh/upgrade migration storage checks also pass unchanged in intent.
+No production backfill or real-key rotation was performed; mail-account crypto
+and legacy columns are retained.
+
+Final Node 24 checks: ESLint and TypeScript passed; 120 Jest suites / 855 tests
+passed (2 suites / 11 tests remain skipped by the existing suite). Production
+build passed with disposable PostgreSQL and Redis running. Protected model reads
+were verified for OpenAI-compatible and Claude calls. Saved webhook tests resolve
+credentials server-side with tenant-scoped lookup. Browser preview capture was
+attempted but blocked by missing Chromium system library `libglib-2.0.so.0`;
+the transient preview manifest records the required tooling.

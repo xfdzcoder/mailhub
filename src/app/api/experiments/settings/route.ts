@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { protectCredentials, readAiCredentials, publicAiSettings } from '@/lib/integrations/credentials';
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import {
@@ -29,17 +31,9 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // Mask API key for security when returning settings to client
-  const { aiApiKey, ...publicSettings } = settings;
-  const maskedApiKey = aiApiKey
-    ? `${aiApiKey.slice(0, 4)}...${aiApiKey.slice(-4)}`
-    : '';
-
   const systemPreferences = await getSystemPreferences();
   return apiResponse({
-    ...publicSettings,
-    aiApiKeyMasked: maskedApiKey,
-    hasApiKey: Boolean(aiApiKey),
+    ...publicAiSettings(settings),
     systemAiEnabled: systemPreferences.isAiEnabled,
   });
 }
@@ -62,7 +56,7 @@ export async function PUT(req: NextRequest) {
     const dataToUpdate: {
       isAiEnabled?: boolean;
       aiProvider?: string;
-      aiApiKey?: string;
+      aiApiKey?: string | null;
       aiBaseUrl?: string | null;
       aiModelName?: string;
       aiCustomPrompt?: string | null;
@@ -88,39 +82,36 @@ export async function PUT(req: NextRequest) {
       if (input.aiCustomPrompt !== null && typeof input.aiCustomPrompt !== 'string') return apiError('aiCustomPrompt must be a string or null', 400);
       dataToUpdate.aiCustomPrompt = input.aiCustomPrompt as string | null;
     }
-    if ('aiApiKey' in input && typeof input.aiApiKey === 'string') {
-      const key = input.aiApiKey.trim();
-      if (key && !key.includes('...')) dataToUpdate.aiApiKey = key;
+    if ('aiApiKey' in input) {
+      if (input.aiApiKey !== null && typeof input.aiApiKey !== 'string') return apiError('aiApiKey must be a string or null', 400);
+      dataToUpdate.aiApiKey = input.aiApiKey === null ? null : (input.aiApiKey as string).trim();
     }
 
-    const settings = existing
-      ? await prisma.experimentSetting.update({
-          where: { organizationId: auth.organizationId },
-          data: dataToUpdate,
-        })
-      : await prisma.experimentSetting.create({
-          data: {
-            organizationId: auth.organizationId,
-            isAiEnabled: true,
-            aiProvider: 'openai',
-            aiModelName: 'gpt-4o-mini',
-            ...dataToUpdate,
-          },
-        });
-
-    const { aiApiKey, ...publicSettings } = settings;
-    const maskedApiKey = aiApiKey
-      ? `${aiApiKey.slice(0, 4)}...${aiApiKey.slice(-4)}`
-      : '';
+    const id = existing?.id || randomUUID();
+    const previous = existing ? readAiCredentials(existing) : { aiApiKey: null, aiBaseUrl: null };
+    const payload = {
+      aiApiKey: dataToUpdate.aiApiKey !== undefined ? dataToUpdate.aiApiKey : previous.aiApiKey,
+      aiBaseUrl: dataToUpdate.aiBaseUrl !== undefined ? dataToUpdate.aiBaseUrl : previous.aiBaseUrl,
+    };
+    const protectedData = protectCredentials('experiment_settings', { id, organizationId: auth.organizationId }, payload);
+    const data = { ...dataToUpdate, ...payload, ...protectedData };
+    // Optimistic concurrency prevents a partial form update overwriting another secret edit.
+    if (existing) {
+      const result = await prisma.experimentSetting.updateMany({
+        where: { id, updatedAt: existing.updatedAt, credentialsEncrypted: existing.credentialsEncrypted }, data,
+      });
+      if (result.count !== 1) return apiError('Settings changed; reload and retry', 409);
+    } else {
+      await prisma.experimentSetting.create({ data: { id, organizationId: auth.organizationId, ...data } });
+    }
+    const settings = await prisma.experimentSetting.findUniqueOrThrow({ where: { id } });
 
     const systemPreferences = await getSystemPreferences();
     return apiResponse({
-      ...publicSettings,
-      aiApiKeyMasked: maskedApiKey,
-      hasApiKey: Boolean(aiApiKey),
+      ...publicAiSettings(settings),
       systemAiEnabled: systemPreferences.isAiEnabled,
     });
-  } catch (err: unknown) {
-    return apiError(err instanceof Error ? err.message : 'Failed to update experiment settings', 500);
+  } catch {
+    return apiError('Failed to update experiment settings', 500);
   }
 }

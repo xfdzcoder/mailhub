@@ -1,0 +1,30 @@
+jest.mock('@/lib/auth/attempts', () => ({ protectSensitive: (_: unknown, handler: unknown) => handler }));
+jest.mock('@/lib/auth/middleware', () => ({ authenticate: async () => ({ organizationId: 'tenant' }), requireAdmin: () => null, apiResponse: (data: unknown) => Response.json(data), apiError: (error: string, status: number) => Response.json({ error }, { status }) }));
+jest.mock('@/lib/db/prisma', () => ({ prisma: { notificationWebhook: { findFirst: jest.fn() } } }));
+jest.mock('@/lib/notifications', () => ({ dispatchWebhookNotification: jest.fn(async () => ({ success: true })) }));
+import { POST } from '@/app/api/experiments/webhooks/test/route';
+import { prisma } from '@/lib/db/prisma';
+import { dispatchWebhookNotification } from '@/lib/notifications';
+import { protectCredentials } from '@/lib/integrations/credentials';
+import type { NextRequest } from 'next/server';
+const request = () => new Request('http://localhost', { method: 'POST', body: JSON.stringify({ id: 'row' }) }) as NextRequest;
+beforeEach(() => { jest.clearAllMocks(); });
+test('saved webhook test resolves protected credentials on server with tenant scope', async () => {
+  process.env.INTEGRATION_CREDENTIAL_KEYS = JSON.stringify({ test: Buffer.alloc(32, 1).toString('base64') });
+  process.env.INTEGRATION_CREDENTIAL_ACTIVE_KEY = 'test';
+  const identity = { id: 'row', organizationId: 'tenant' };
+  const config = { url: 'https://example.invalid/secret' };
+  (prisma.notificationWebhook.findFirst as jest.Mock).mockResolvedValue({ ...identity, type: 'GENERIC', config: {}, ...protectCredentials('notification_webhooks', identity, { config }) });
+  expect((await POST(request())).status).toBe(200);
+  expect(prisma.notificationWebhook.findFirst).toHaveBeenCalledWith({ where: { id: 'row', organizationId: 'tenant' } });
+  expect(dispatchWebhookNotification).toHaveBeenCalledWith(expect.objectContaining({ config }));
+});
+test('unknown tenant row never dispatches; raw provider exceptions are suppressed', async () => {
+  (prisma.notificationWebhook.findFirst as jest.Mock).mockResolvedValue(null);
+  expect((await POST(request())).status).toBe(404);
+  expect(dispatchWebhookNotification).not.toHaveBeenCalled();
+  (prisma.notificationWebhook.findFirst as jest.Mock).mockRejectedValue(new Error('synthetic-secret'));
+  const response = await POST(request());
+  expect(response.status).toBe(500);
+  expect(await response.text()).not.toContain('synthetic-secret');
+});

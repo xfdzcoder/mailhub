@@ -28,7 +28,7 @@ export async function dispatchWebhookNotification(
       return {
         success: false,
         type,
-        error: `Unsupported webhook type: ${type}`,
+        error: 'Unsupported webhook type',
         deliveredAt: new Date().toISOString(),
       };
   }
