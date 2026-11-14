@@ -1,5 +1,6 @@
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
+    $executeRaw: jest.fn().mockResolvedValue(0),
     email: { findFirst: jest.fn(), findUnique: jest.fn() },
     $transaction: jest.fn(),
   },
@@ -45,6 +46,8 @@ describe('Gmail indexing retry', () => {
       createdAt: new Date('2020-01-01T00:00:00.000Z'),
     };
     const transactionClient = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      incomingMailRejection: { deleteMany: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
       email: {
         upsert: jest
           .fn()
@@ -93,4 +96,45 @@ describe('Gmail indexing retry', () => {
     expect(searchQueue.add).toHaveBeenCalledTimes(2);
     expect(searchQueue.add).toHaveBeenLastCalledWith('index-email', { emailId: 'email-1' });
   });
+});
+
+it('continues ordinary Gmail messages after rejection, a manager restart, and a transient parse error', async () => {
+  const { IncomingPolicyError } = await import('@/lib/email/incoming-budget');
+  const rejected = new Set<string>();
+  const tx = {
+    $executeRaw: jest.fn(async (sql: TemplateStringsArray, ...values: unknown[]) => {
+      if (sql.join('?').includes('INSERT INTO incoming_mail_rejections')) rejected.add(String(values[2]));
+      return 0;
+    }),
+    incomingMailRejection: {
+      deleteMany: jest.fn(),
+      findFirst: jest.fn(async ({ where }) => rejected.has(where.providerMessageId) ? { policyVersion: 2 } : null),
+    },
+    email: { upsert: jest.fn().mockResolvedValue({ id: 'synthetic-email', createdAt: new Date(0) }) },
+    emailBody: { upsert: jest.fn() },
+    attachment: { deleteMany: jest.fn() },
+  };
+  (prisma.$transaction as jest.Mock).mockImplementation(operation => operation(tx));
+  (prisma.email.findFirst as jest.Mock).mockResolvedValue(null);
+  (prisma.email.findUnique as jest.Mock).mockResolvedValue({ attachments: [] });
+  (fetchMessageFull as jest.Mock).mockResolvedValue({ payload: {} });
+  (fetchMessageRaw as jest.Mock).mockResolvedValue(Buffer.from('synthetic'));
+  (searchQueue.add as jest.Mock).mockResolvedValue(undefined);
+  const ordinary = { messageId: 'synthetic-ordinary', attachments: [], receivedAt: new Date(0) };
+  (parseEmail as jest.Mock).mockRejectedValueOnce(new IncomingPolicyError('message_size_limit')).mockResolvedValue(ordinary);
+  const run = (manager: GmailSyncManager, id: string) =>
+    (manager as unknown as { fetchAndPersist: (...args: unknown[]) => Promise<boolean> })
+      .fetchAndPersist('synthetic-token', 'synthetic-account', 'synthetic-org', id, 'INBOX', true);
+  const first = new GmailSyncManager();
+  expect(await run(first, 'synthetic-large')).toBe(true);
+  expect(await run(first, 'synthetic-ordinary-1')).toBe(true);
+  const restarted = new GmailSyncManager();
+  const readsBefore = (fetchMessageRaw as jest.Mock).mock.calls.length;
+  expect(await run(restarted, 'synthetic-large')).toBe(true);
+  expect((fetchMessageRaw as jest.Mock).mock.calls.length).toBe(readsBefore);
+  (parseEmail as jest.Mock).mockRejectedValueOnce(new Error('temporary parser crash'));
+  expect(await run(restarted, 'synthetic-transient')).toBe(false);
+  expect(rejected.has('synthetic-transient')).toBe(false);
+  expect(await run(restarted, 'synthetic-transient')).toBe(true);
+  expect(await run(restarted, 'synthetic-ordinary-2')).toBe(true);
 });

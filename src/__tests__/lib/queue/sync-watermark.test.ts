@@ -173,3 +173,24 @@ describe('initial sync watermark handling', () => {
     expect(imapManager.enableReconciliation).toHaveBeenCalledWith('account-1');
   });
 });
+
+it('uses the start cutoff and fences the account revision when historical work finishes later', async () => {
+  jest.useFakeTimers();
+  const cutoff = new Date('2026-11-14T12:00:00.000Z');
+  const revision = new Date('2026-11-14T11:00:00.000Z');
+  jest.setSystemTime(cutoff);
+  (prisma.emailAccount.update as jest.Mock).mockResolvedValue(gmailAccount);
+  (gmailSyncManager.initializeAccount as jest.Mock).mockResolvedValue(undefined);
+  (prisma.emailAccount.findUnique as jest.Mock).mockResolvedValue({ ...gmailAccount, updatedAt: revision });
+  (gmailSyncManager.syncHistoricalEmails as jest.Mock).mockImplementation(async () => {
+    jest.setSystemTime(new Date('2026-11-14T12:10:00.000Z'));
+    return { processed: 2, failed: 0 };
+  });
+  try {
+    await syncProcessor({ name: 'initial-sync', data: { accountId: 'account-1', folder: 'ALL' } });
+    expect(prisma.emailAccount.update).toHaveBeenLastCalledWith({
+      where: { id: 'account-1', updatedAt: { gte: revision, lt: new Date(revision.getTime() + 1) } },
+      data: { lastSyncedAt: cutoff, initialSyncCompletedAt: expect.any(Date) },
+    });
+  } finally { jest.useRealTimers(); }
+});

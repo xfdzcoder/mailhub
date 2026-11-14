@@ -23,6 +23,11 @@ export class IncomingBudgetError extends Error {
   }
 }
 
+export type RejectionReason = 'message_size_limit' | 'header_size_limit' | 'mime_depth_limit' | 'mime_part_limit' | 'attachment_size_limit';
+export class IncomingPolicyError extends IncomingBudgetError {
+  constructor(readonly reasonCode: RejectionReason) { super(`Incoming budget exceeded: ${reasonCode}`); }
+}
+
 /** Count actual bytes before retaining chunks; destroy even on timeout or iterator failure. */
 export async function collectIncoming(
   source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
@@ -44,7 +49,11 @@ export async function collectIncoming(
     for await (const chunk of source) {
       if (closed) throw new IncomingBudgetError('Incoming read cancelled');
       size += chunk.byteLength;
-      if (size > limit) throw new IncomingBudgetError();
+      if (size > limit) {
+        // A whole provider response is not evidence about a single message.
+        if (limit === INCOMING_LIMITS.response) throw new IncomingBudgetError();
+        throw new IncomingPolicyError(limit === INCOMING_LIMITS.attachment ? 'attachment_size_limit' : 'message_size_limit');
+      }
       chunks.push(Buffer.from(chunk));
     }
     return Buffer.concat(chunks, size);

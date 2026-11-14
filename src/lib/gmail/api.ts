@@ -1,4 +1,4 @@
-import { incomingJson, IncomingBudgetError, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
+import { incomingJson, IncomingBudgetError, IncomingPolicyError, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import { validateRawOutgoing } from '@/lib/email/outgoing-budget';
 import { decrypt, encrypt } from '@/lib/crypto';
 import { prisma } from '@/lib/db/prisma';
@@ -223,7 +223,7 @@ export function extractGmailAttachmentParts(
   const parts: GmailMessagePart[] = [];
   let visited = 0;
   const visit = (part: GmailMessagePart) => {
-    if (++visited > INCOMING_LIMITS.parts) throw new IncomingBudgetError();
+    if (++visited > INCOMING_LIMITS.parts) throw new IncomingPolicyError('mime_part_limit');
     if (isGmailAttachmentPart(part)) parts.push(part);
     for (const childPart of part.parts ?? []) visit(childPart);
   };
@@ -233,9 +233,12 @@ export function extractGmailAttachmentParts(
 }
 
 export function decodeGmailBase64(data: string, limit: number = INCOMING_LIMITS.raw): Buffer {
-  if (typeof data !== 'string' || data.length > Math.ceil(limit / 3) * 4 || !/^[A-Za-z0-9_+\/=-]*$/.test(data)) throw new IncomingBudgetError();
+  if (typeof data !== 'string' || !/^[A-Za-z0-9_+\/-]*={0,2}$/.test(data) ||
+      data.length % 4 === 1 || (data.includes('=') && data.length % 4 !== 0)) {
+    throw new IncomingBudgetError('Malformed provider encoding');
+  }
   const size = Buffer.byteLength(data, 'base64');
-  if (size > limit) throw new IncomingBudgetError();
+  if (size > limit) throw new IncomingPolicyError(limit === INCOMING_LIMITS.attachment ? 'attachment_size_limit' : 'message_size_limit');
   return Buffer.from(data, 'base64');
 }
 

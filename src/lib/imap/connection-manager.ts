@@ -1,3 +1,4 @@
+import { evaluateIncoming, imapSource, syncRevision } from '@/lib/email/incoming-rejections';
 import { readImapIncoming, IMAP_RESPONSE_LIMITS, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import { ImapFlow, FetchMessageObject, type ImapFlowOptions, type MailboxLockObject, type MailboxObject } from 'imapflow';
 import type { Prisma } from '@prisma/client';
@@ -847,7 +848,7 @@ export class IMAPConnectionManager {
     try {
       const account = await prisma.emailAccount.findUnique({
         where: { id: accountId },
-        select: { lastSyncedAt: true },
+        select: { lastSyncedAt: true, updatedAt: true },
       });
       if (!account) return;
 
@@ -875,11 +876,12 @@ export class IMAPConnectionManager {
           }
         } catch (error) {
           console.error(`Failed to reconcile IMAP ${folder} mailbox ${mailbox.path} for account ${accountId}:`, error);
+          throw error;
         }
       }
 
       await prisma.emailAccount.update({
-        where: { id: accountId },
+        where: { id: accountId, updatedAt: syncRevision(account.updatedAt) },
         data: { lastSyncedAt: cutoff },
       });
     } finally {
@@ -968,6 +970,7 @@ export class IMAPConnectionManager {
         { uid: missingUids.length > 0 || fetchByUid }
       );
 
+      syncResult.failed += missingUids.filter(uid => !messages.some(message => message.uid === uid)).length;
       let nextMessageIndex = 0;
       const worker = async () => {
         while (nextMessageIndex < messages.length) {
@@ -1026,10 +1029,18 @@ export class IMAPConnectionManager {
     skipNotifications: boolean = false
   ): Promise<boolean> {
     try {
-      const download = await readImapIncoming(this.connections.get(accountId)!.client, String(message.uid), undefined, INCOMING_LIMITS.raw);
-      const rawSource = download?.content;
-      if (!rawSource) return false;
-      const parsed = await parseEmail(rawSource);
+      const client = this.connections.get(accountId)!.client;
+      const mailbox = client.mailbox;
+      const source = mailbox && mailbox.uidValidity
+        ? imapSource(accountId, mailbox.path, BigInt(mailbox.uidValidity), BigInt(message.uid)) : null;
+      const outcome = await evaluateIncoming(source, async () => {
+        const download = await readImapIncoming(client, String(message.uid), undefined, INCOMING_LIMITS.raw);
+        if (!download?.content) throw new Error('Missing IMAP source');
+        return parseEmail(download.content);
+      });
+      if (outcome.kind === 'rejected') return true;
+      if (outcome.kind === 'retryable') throw outcome.error;
+      const parsed = outcome.value;
       const receivedAt = resolveImapReceivedAt(message.internalDate, parsed.receivedAt);
 
       // Resolve thread ID (cross-account)

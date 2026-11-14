@@ -1,8 +1,7 @@
 # Incoming mail rejection persistence
 
-Issue #56 adds storage only. No sync worker, policy decision, UI, resync endpoint,
-or cleanup scheduler uses this table yet; #50 must adopt this contract before
-recording rejections. The migration creates an empty table on fresh and legacy
+The migration from #62 provides storage; #50 now applies this contract in the
+Gmail and IMAP incoming workers. The migration creates an empty table on fresh and legacy
 PostgreSQL databases without inspecting or modifying existing mail.
 
 ## Identity and privacy
@@ -69,8 +68,8 @@ There is one current outcome per source, not an unlimited history of attempts.
 An explicit user resync must clear this account's rejection records before
 reevaluation, regardless of version. #50 must coordinate resync/policy transitions
 with in-flight workers to prevent old work from restoring stale suppression.
-Account deletion removes records immediately. None of these decisions is wired
-into sync by this prerequisite migration.
+Account deletion removes records immediately. The migration itself installs no policy or scheduler; the worker implements
+these lifecycle decisions.
 
 ## Isolated PostgreSQL verification
 
@@ -89,3 +88,59 @@ PostgreSQL 16.4 databases, one fresh and one seeded with a synthetic user after
 the initial migration. Both fixture files passed, including a real PostgreSQL
 process restart between them. `bash -n scripts/ci/smoke.sh` also passed. The full
 Docker application smoke test was not run locally because Docker is unavailable.
+
+## Worker behavior and follow-up verification
+
+`IncomingOutcome` distinguishes accepted content, durable policy rejection, and
+retryable failure. Only `IncomingPolicyError` from measured message/decoded,
+attachment, or part-count limits can produce a row. Response-wide limits,
+transport errors, malformed provider data, parser exceptions, worker crashes,
+timeouts, cancellation, missing source identity and database failures remain
+retryable. Header/depth reason codes remain reserved vocabulary; no new header
+or depth policy is enabled by this follow-up.
+
+IMAP uses the selected mailbox path and UIDVALIDITY, never the app folder name.
+Gmail uses its opaque message ID. An account-scoped PostgreSQL advisory lock
+serializes bounded reads and rejection writes with explicit resync clearing.
+The transaction is bounded to 120 seconds; contention/timeout rolls back and
+retries. Atomic SQL upserts use database timestamps and preserve first rejection
+and expiry, including submillisecond database precision. A policy version bump
+must accompany any change to the complete `INCOMING_LIMITS` configuration.
+Old-version records cannot suppress the new policy, and a superseded worker
+returns a retryable outcome when it encounters newer evidence. Upserts cannot
+downgrade a newer policy version. The account lock orders in-flight evaluations
+and resets across worker processes.
+
+`POST /api/accounts/[id]/sync` authorizes account access, waits for active
+rejection evaluations, clears only that account's records and sync timestamps,
+and queues a distinct resync job even if an initial sync is active. Watermark
+updates use the original account `updatedAt` as an optimistic fence, preventing
+pre-reset work from advancing the reset watermark. Gmail and historical queue
+watermarks use the start cutoff, not the finish time. IMAP mailbox failures and
+missing fetched bodies prevent watermark advancement. Later messages in the
+same batch continue after a durable rejection or an individual transient error.
+
+Startup cleanup precedes new content evaluation, and the worker runs cleanup
+daily. Each indexed delete transaction removes at most 1,000 expired rows;
+cleanup drains the backlog after downtime. No provider mutation is used.
+
+Synthetic unit tests cover typed failures, persistence failure, scoped resets,
+identity validation, bounded cleanup, and full multi-chunk attachment downloads
+for Gmail and IMAP. `scripts/ci/incoming-rejections-worker.ts` adds executable
+PostgreSQL acceptance coverage. Against a disposable fully migrated database,
+set `DATABASE_URL` and `INCOMING_REJECTION_FIXTURE=1`, run
+`npx tsx scripts/ci/incoming-rejections-worker.ts seed`, restart PostgreSQL, then
+run the same command with `verify`. The separate processes verify durable
+provider deduplication, ordinary successor messages after restart, fixed
+retention across policy reevaluation, expiry, cleanup and an in-flight resync.
+The fixtures use only synthetic `example.invalid` identities and remove them
+after successful verification. Never run this fixture against deployed data.
+
+Follow-up validation used Node 22.23.4, Node 24.22.3 and disposable PostgreSQL 18.6: all
+migrations, the storage SQL fixtures across a database restart, and the worker
+fixture across separate processes and another database restart passed. The
+worker fixture also verifies that pre-resync work cannot advance a reset
+watermark and that a current revision remains writable with PostgreSQL timestamp
+precision. Lint, TypeScript, 884 tests and production build passed on Node 24. Redis
+integration tests (11) remain skipped because Redis is unavailable; the full
+Docker application smoke remains outstanding. This change has no visual presentation.

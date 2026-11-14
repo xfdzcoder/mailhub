@@ -1,6 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import type { ParsedMail } from 'mailparser';
-import { IncomingBudgetError, INCOMING_LIMITS } from './incoming-budget';
+import { IncomingBudgetError, IncomingPolicyError, INCOMING_LIMITS } from './incoming-budget';
 
 // Keep third-party MIME decoding and HTML conversion outside the application heap.
 const workerSource = `
@@ -16,9 +16,10 @@ let text = {};
 let headers;
 let headerLines;
 const pending = [];
+function policy(reasonCode) { const error = new Error('Incoming budget exceeded: ' + reasonCode); error.reasonCode = reasonCode; parentPort.postMessage({ error: error.message, reasonCode }); return error; }
 function charge(size) {
   total += size;
-  if (total > limits.decoded) throw new Error('Decoded MIME budget exceeded');
+  if (total > limits.decoded) throw policy('message_size_limit');
 }
 // Pinned mailparser adapter: gate transfer and charset decoder output before
 // its text accumulator sees bytes. Tests must cover this hook on upgrades.
@@ -27,7 +28,7 @@ function gate(stream, perPart = limits.decoded) {
   return compose(stream, new Transform({ transform(chunk, encoding, done) {
     try {
       size += Buffer.byteLength(chunk);
-      if (size > perPart) throw new Error('MIME part byte budget exceeded');
+      if (size > perPart) throw policy(perPart === limits.attachment ? 'attachment_size_limit' : 'message_size_limit');
       charge(Buffer.byteLength(chunk));
       done(null, chunk);
     } catch (error) { done(error); }
@@ -35,7 +36,7 @@ function gate(stream, perPart = limits.decoded) {
 }
 const createNode = parser.createNode.bind(parser);
 parser.createNode = node => {
-  if (++count > limits.parts) throw new Error('MIME part budget exceeded');
+  if (++count > limits.parts) throw policy('mime_part_limit');
   const result = createNode(node);
   if (result.decoder) result.decoder = gate(result.decoder, result.isAttachment ? limits.attachment : limits.decoded);
   return result;
@@ -58,7 +59,7 @@ parser.on('data', part => {
     try {
       for await (const chunk of part.content) {
         size += chunk.length;
-        if (size > limits.attachment) throw new Error('Attachment budget exceeded');
+        if (size > limits.attachment) throw policy('attachment_size_limit');
         chunks.push(chunk);
       }
       const { content, release, ...metadata } = part;
@@ -68,7 +69,7 @@ parser.on('data', part => {
   pending.push(task);
   task.catch(error => parser.destroy(error));
 });
-parser.on('error', error => { parentPort.postMessage({ error: error.message }); });
+parser.on('error', error => { parentPort.postMessage({ error: error.message, reasonCode: error.reasonCode }); });
 parser.on('end', async () => {
   try {
     await Promise.all(pending);
@@ -91,14 +92,14 @@ parser.on('end', async () => {
       result[field] = headers.get(key);
     }
     parentPort.postMessage({ result });
-  } catch (error) { parentPort.postMessage({ error: error.message }); }
+  } catch (error) { parentPort.postMessage({ error: error.message, reasonCode: error.reasonCode }); }
 });
 parser.end(Buffer.from(workerData.raw));
 `;
 
 export async function parseBoundedMime(raw: Buffer | string, signal?: AbortSignal): Promise<ParsedMail> {
   signal?.throwIfAborted();
-  if (Buffer.byteLength(raw) > INCOMING_LIMITS.raw) throw new IncomingBudgetError();
+  if (Buffer.byteLength(raw) > INCOMING_LIMITS.raw) throw new IncomingPolicyError('message_size_limit');
   const worker = new Worker(workerSource, {
     eval: true,
     workerData: { raw, limits: INCOMING_LIMITS, module: require.resolve('mailparser') },
@@ -112,8 +113,8 @@ export async function parseBoundedMime(raw: Buffer | string, signal?: AbortSigna
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) onAbort();
       timer = setTimeout(() => reject(new IncomingBudgetError('MIME parse timed out')), INCOMING_LIMITS.timeoutMs);
-      worker.once('message', ({ result, error }) => error ? reject(new IncomingBudgetError(error)) : resolve(result));
-      worker.once('error', error => reject(new IncomingBudgetError(error.message)));
+      worker.once('message', ({ result, error, reasonCode }) => error ? reject(reasonCode ? new IncomingPolicyError(reasonCode) : new Error(error)) : resolve(result));
+      worker.once('error', reject);
       worker.once('exit', code => reject(new IncomingBudgetError(`MIME worker exited (${code})`)));
     });
     for (const attachment of parsed.attachments) attachment.content = Buffer.from(attachment.content);

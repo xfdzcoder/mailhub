@@ -1,3 +1,4 @@
+import { syncRevision } from '@/lib/email/incoming-rejections';
 import { Worker, Job } from 'bullmq';
 import type { QueueOptions } from 'bullmq';
 import Redis from 'ioredis';
@@ -50,6 +51,7 @@ async function processSyncJob(
   workerPartition: string
 ): Promise<void> {
     const { accountId, folder } = job.data;
+    const cutoff = new Date();
     
     console.log(`Starting sync for account ${accountId}, folder: ${folder}`);
     
@@ -106,9 +108,9 @@ async function processSyncJob(
       
       // Update account sync timestamp
       await prisma.emailAccount.update({
-        where: { id: accountId },
+        where: { id: accountId, updatedAt: syncRevision(account.updatedAt) },
         data: { 
-          lastSyncedAt: new Date(),
+          lastSyncedAt: cutoff,
           ...(account.initialSyncCompletedAt ? {} : { initialSyncCompletedAt: new Date() })
         }
       });

@@ -1,3 +1,4 @@
+import { cleanupIncomingRejections } from '@/lib/email/incoming-rejections';
 import { config } from 'dotenv';
 config();
 
@@ -47,6 +48,11 @@ async function initializeImapConnections(accounts: EmailAccount[]): Promise<void
 async function bootstrap() {
   console.log(`Bootstrapping Worker [Partition: ${WORKER_PARTITION}]`);
 
+  await cleanupIncomingRejections();
+  const rejectionCleanup = setInterval(() => {
+    cleanupIncomingRejections().catch(error => console.error('Incoming rejection cleanup failed', error));
+  }, 24 * 60 * 60 * 1000);
+
   // 1. Initialize dependencies
   await initMeilisearch();
   const systemPreferences = await getSystemPreferences();
@@ -92,6 +98,7 @@ async function bootstrap() {
   const shutdown = async () => {
     console.log('SIGTERM received. Shutting down worker...');
     clearInterval(heartbeat);
+    clearInterval(rejectionCleanup);
     await closeSyncWorkers();
     await searchWorker.close();
     await summaryWorker.close();
