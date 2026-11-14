@@ -10,7 +10,7 @@
     "lint": "eslint .",
     "services:up": "docker-compose up -d",
     "services:down": "docker-compose down",
-    "test": "jest",
+    "test": "node --test scripts/ci/tooling-compatibility.test.mjs && jest",
     "test:watch": "jest --watch",
     "worker": "npx tsx src/worker.ts",
     "db:seed": "npx tsx --env-file=.env.local scripts/seed.ts",
@@ -88,6 +88,22 @@
     "typescript": "^5"
   },
   "overrides": {
+    "@jest/reporters": {
+      "glob": "14.0.6"
+    },
+    "jest-config": {
+      "glob": "14.0.6"
+    },
+    "jest-runtime": {
+      "glob": "14.0.6"
+    },
+    "test-exclude": {
+      "glob": "14.0.6",
+      "minimatch": "11.0.8"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.8"
+    },
     "@tailwindcss/typography": {
       "postcss-selector-parser": "6.1.5"
     }
