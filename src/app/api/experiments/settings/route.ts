@@ -21,8 +21,11 @@ export async function GET(req: NextRequest) {
   });
 
   if (!settings) {
+    const id = randomUUID();
     settings = await prisma.experimentSetting.create({
       data: {
+        id,
+        ...protectCredentials('experiment_settings', { id, organizationId: auth.organizationId }, { aiApiKey: null, aiBaseUrl: null }),
         organizationId: auth.organizationId,
         isAiEnabled: true,
         aiProvider: 'openai',
@@ -94,7 +97,7 @@ export async function PUT(req: NextRequest) {
       aiBaseUrl: dataToUpdate.aiBaseUrl !== undefined ? dataToUpdate.aiBaseUrl : previous.aiBaseUrl,
     };
     const protectedData = protectCredentials('experiment_settings', { id, organizationId: auth.organizationId }, payload);
-    const data = { ...dataToUpdate, ...payload, ...protectedData };
+    const data = { ...dataToUpdate, aiApiKey: null, aiBaseUrl: null, ...protectedData };
     // Optimistic concurrency prevents a partial form update overwriting another secret edit.
     if (existing) {
       const result = await prisma.experimentSetting.updateMany({

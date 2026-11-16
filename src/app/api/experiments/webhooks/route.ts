@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
         organizationId: auth.organizationId,
         name: name.trim(),
         type,
-        config,
+        config: {}, // Required legacy JSON column; credentials live only in the protected tuple.
         isActive: true,
       },
     });

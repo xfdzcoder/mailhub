@@ -44,7 +44,12 @@ async function main() {
         const payload = table === 'experiment_settings' ? { aiApiKey: row.aiApiKey, aiBaseUrl: row.aiBaseUrl } : { config: row.config };
         if ([row.credentialsEncrypted, row.credentialsFormatVersion, row.credentialsKeyVersion].some(v => v != null)) {
           const recovered = table === 'experiment_settings' ? readAiCredentials(row) : { config: readWebhookCredentials(row) };
-          if (!isDeepStrictEqual(recovered, payload)) throw new Error('Protected credential reconciliation failed');
+          // New writers clear legacy AI columns / store an empty webhook object.
+          // Authenticate those rows without comparing ciphertext to the placeholder.
+          const cleared = table === 'experiment_settings'
+            ? row.aiApiKey === null && row.aiBaseUrl === null
+            : isDeepStrictEqual(row.config, {});
+          if (!cleared && !isDeepStrictEqual(recovered, payload)) throw new Error('Protected credential reconciliation failed');
         } else {
           const encrypted = protectCredentials(table, row, payload);
           // JSONB snapshot equality includes timestamp, source, tenant, type and tuple.

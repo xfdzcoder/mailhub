@@ -47,7 +47,7 @@ key ID to prevent ciphertext substitution. This defines a future implementation
 contract; this change adds no encryption helper, key configuration or runtime use.
 Do not reinterpret the existing mail-account `iv:tag:ciphertext` hex format.
 
-## Bounded, resumable backfill plan (not executed by this change)
+## Original storage-stage backfill plan (historical; runtime rollout below supersedes cutover/rollback)
 
 1. Deploy this additive migration first. Schedule a separately reviewed operator
    tool; never run backfill from SQL migration or application startup. Test only
@@ -90,8 +90,7 @@ Rollback before cutover: stop the tool, keep legacy readers/writers, preserve al
 plaintext and keys. Prefer leaving unused nullable columns in place. If abandoning
 a populated run, clear all three fields atomically only for verified run-owned
 rows using CAS on the exact target tuple; never clear another run's output. After
-a runtime cutover, rollback requires the follow-up's dual-write/reconciliation
-procedure to ensure plaintext is current. Dropping columns is optional destructive
+a runtime cutover, the encrypted-only rollout boundary below governs rollback. Dropping columns is optional destructive
 cleanup requiring a separate reviewed migration after all new consumers stop.
 No plaintext removal, endpoint changes, provider redaction, key rotation or
 runtime switching is included here.
@@ -144,8 +143,16 @@ base64-encoded 32-byte keys, and `INTEGRATION_CREDENTIAL_ACTIVE_KEY` as the writ
 key ID. This registry is separate from mail-account encryption. Readers use each
 row's recorded key and reject partial tuples, unknown versions, missing keys and
 authentication failures. Only an entirely absent tuple permits legacy reads.
-Settings mutations dual-write source and protected data atomically; retain legacy
-columns for rollback/reconciliation. The guard migration rejects old credential
+Settings mutations write secrets only to the protected tuple. AI writes atomically
+clear both legacy columns to SQL NULL; webhook creation stores {} in the required
+legacy JSON column. Even non-secret AI edits preserve omitted secrets by decrypting
+the existing tuple (or reading an all-null legacy tuple), then encrypting the
+merged payload. Empty and explicitly cleared values remain encoded in ciphertext.
+Legacy rows remain readable only when the entire protected tuple is absent.
+Backfill preserves legacy source values and authenticates populated tuples:
+cleared legacy placeholders identify rows from the new writer; remaining legacy
+values must match the decrypted payload. It never replaces populated ciphertext
+on replay. Authentication failure always stops processing. The guard migration rejects old credential
 writers on populated rows unless they also replace ciphertext. Deploy it before
 backfill. Settings responses contain presence flags only, with no partial key,
 endpoint, webhook config or protected storage metadata.
@@ -181,3 +188,49 @@ were verified for OpenAI-compatible and Claude calls. Saved webhook tests resolv
 credentials server-side with tenant-scoped lookup. Browser preview capture was
 attempted but blocked by missing Chromium system library `libglib-2.0.so.0`;
 the transient preview manifest records the required tooling.
+
+## Encrypted-only rollout boundary (#66)
+
+Before enabling this application version, deploy the additive schema and guard
+migration, provision the same key registry to **every web and worker process**,
+and stop/drain all old writers. Do not use a rolling mixture of old and new
+writers/readers: old readers cannot consume encrypted-only rows, and the guard
+rejects old secret edits on protected rows. Deploy encryption-capable readers and
+writers together; backfill is optional for runtime compatibility and never runs
+on startup. New writes fail closed if their active key is unavailable.
+
+Generate a fresh 32-byte key with
+`node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`.
+Store it through the deployment secret manager, for example a JSON registry with
+one entry `{"v1":"<generated base64 key>"}` and active ID `v1`. Do not use that
+placeholder literally. These settings are required for new settings writes,
+including default settings creation; there is no development fallback key.
+Never commit key material or include it in logs/checkpoints. Keep all referenced
+key IDs available to readers and backups; changing the active ID affects only
+subsequent writes and is not a rotation/backfill procedure.
+
+**The rollback boundary is the first encrypted-only settings write.** After it,
+rolling back to legacy-only code loses access to the newest credentials. Roll
+back only to a version that understands this protected format and retain its
+keys. Any return to legacy-only code requires a separately reviewed, coordinated
+restore/export procedure; retained legacy columns are not current rollback data.
+This change does not rotate actual keys, delete legacy columns, clear plaintext
+from untouched legacy/backfilled rows, or run a production backfill.
+
+For synthetic verification, run the runtime script against an explicit disposable
+loopback PostgreSQL server as above:
+`CREDENTIAL_STORAGE_TEST_SERVER_URL=<local-test-server-url> node scripts/ci/integration-credentials-runtime.mjs`.
+It creates/drops its own database, invokes actual authenticated settings route
+handlers with Prisma (no database/auth mocks), checks legacy reads and upgrade on
+partial edits, encrypted-only AI/webhook writes, write-only responses, missing-key
+failure, and bounded backfill/resume/reconciliation across both row types.
+
+Follow-up validation (2026-11-16): Node 22.23.4 and a newly initialized,
+disposable PostgreSQL 18.6 cluster on loopback port 55427. The actual-route check
+and 1,004-row bounded backfill/resume/reconciliation passed, including ciphertext
+preservation across reconciliation and rejection of a corrupted encrypted-only
+webhook. Default settings creation, PUT creation, explicit clearing, and partial
+updates were exercised. Full Jest: 120 suites / 855 tests passed, with the existing
+2 suites / 11 tests skipped. ESLint, TypeScript, Prisma validation and diff checks
+passed. All test databases were dropped; no production data or real keys were used.
+There is no visible UI change and no preview was generated.

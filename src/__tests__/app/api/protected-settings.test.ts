@@ -25,6 +25,8 @@ test('ordinary settings edits preserve and encrypt both secrets atomically', asy
   });
   expect((await PUT(req({ aiModelName: 'test-model' }))).status).toBe(200);
   const data = (prisma.experimentSetting.updateMany as jest.Mock).mock.calls[0][0].data;
+  expect(data.aiApiKey).toBeNull();
+  expect(data.aiBaseUrl).toBeNull();
   expect(readAiCredentials({ ...row, ...data })).toEqual({ aiApiKey: row.aiApiKey, aiBaseUrl: row.aiBaseUrl });
 });
 test('concurrent change returns conflict and invalid protected data never falls back', async () => {
@@ -40,6 +42,7 @@ test('webhook create encrypts unknown properties and responses are write-only', 
   expect(response.status).toBe(201);
   expect(JSON.stringify(await response.json())).not.toMatch(/synthetic-secret|example.test|credentialsEncrypted/);
   const data = (prisma.notificationWebhook.create as jest.Mock).mock.calls[0][0].data;
+  expect(data.config).toEqual({});
   expect(readWebhookCredentials(data)).toEqual(config);
   (prisma.notificationWebhook.findMany as jest.Mock).mockResolvedValue([data]);
   expect(JSON.stringify(await (await hooksGet(req({}))).json())).not.toMatch(/synthetic-secret|example.test|credentialsEncrypted/);
