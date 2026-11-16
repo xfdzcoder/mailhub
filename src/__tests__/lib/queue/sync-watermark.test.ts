@@ -1,3 +1,8 @@
+jest.mock('@/lib/email/incoming-rejections', () => ({
+  ...jest.requireActual('@/lib/email/incoming-rejections'),
+  clearIncomingRejections: jest.fn(),
+}));
+import { clearIncomingRejections } from '@/lib/email/incoming-rejections';
 jest.mock('ioredis', () =>
   jest.fn().mockImplementation(() => ({
     on: jest.fn(),
@@ -51,7 +56,7 @@ import { redis } from '@/lib/redis';
 import '@/lib/queue/workers/sync';
 
 const syncProcessor = (Worker as unknown as jest.Mock).mock.calls[0][1] as (
-  job: { name: string; data: { accountId: string; folder: string } }
+  job: { name: string; data: { accountId: string; folder: string; resetIncoming?: boolean } }
 ) => Promise<void>;
 
 const gmailAccount = {
@@ -193,4 +198,18 @@ it('uses the start cutoff and fences the account revision when historical work f
       data: { lastSyncedAt: cutoff, initialSyncCompletedAt: expect.any(Date) },
     });
   } finally { jest.useRealTimers(); }
+});
+
+it('resets a queued resync before provider work and reloads its revision', async () => {
+  jest.clearAllMocks();
+  const account = { ...gmailAccount, updatedAt: new Date('2026-01-01') };
+  const refreshed = { ...account, updatedAt: new Date('2026-01-02') };
+  (prisma.emailAccount.findUnique as jest.Mock).mockResolvedValueOnce(account).mockResolvedValueOnce(refreshed);
+  (clearIncomingRejections as jest.Mock).mockImplementationOnce(async () => {
+    expect(gmailSyncManager.initializeAccount).not.toHaveBeenCalled();
+  });
+  (gmailSyncManager.syncHistoricalEmails as jest.Mock).mockResolvedValue({ processed: 1, failed: 0 });
+  await syncProcessor({ name: 'initial-sync', data: { accountId: account.id, folder: 'ALL', resetIncoming: true } });
+  expect(clearIncomingRejections).toHaveBeenCalledWith(account.id);
+  expect(prisma.emailAccount.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: account.id, updatedAt: { gte: refreshed.updatedAt, lt: new Date(refreshed.updatedAt.getTime() + 1) } } }));
 });

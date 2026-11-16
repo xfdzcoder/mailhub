@@ -47,6 +47,7 @@ describe('Gmail indexing retry', () => {
     };
     const transactionClient = {
       $executeRaw: jest.fn().mockResolvedValue(0),
+      emailAccount: { findUniqueOrThrow: jest.fn().mockResolvedValue({ updatedAt: new Date('2026-01-01') }), findFirst: jest.fn().mockResolvedValue({ id: 'synthetic-account' }) },
       incomingMailRejection: { deleteMany: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
       email: {
         upsert: jest
@@ -106,6 +107,7 @@ it('continues ordinary Gmail messages after rejection, a manager restart, and a 
       if (sql.join('?').includes('INSERT INTO incoming_mail_rejections')) rejected.add(String(values[2]));
       return 0;
     }),
+    emailAccount: { findUniqueOrThrow: jest.fn().mockResolvedValue({ updatedAt: new Date('2026-01-01') }), findFirst: jest.fn().mockResolvedValue({ id: 'synthetic-account' }) },
     incomingMailRejection: {
       deleteMany: jest.fn(),
       findFirst: jest.fn(async ({ where }) => rejected.has(where.providerMessageId) ? { policyVersion: 2 } : null),

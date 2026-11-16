@@ -1,4 +1,4 @@
-import { evaluateIncoming, syncRevision } from '@/lib/email/incoming-rejections';
+import { validateRevision, evaluateIncoming, syncRevision } from '@/lib/email/incoming-rejections';
 import { prisma } from '@/lib/db/prisma';
 import { parseEmail } from '@/lib/imap/email-parser';
 import { resolveThreadId } from '@/lib/imap/threading';
@@ -336,6 +336,7 @@ export class GmailSyncManager {
       );
 
       const email = await retryAsync(() => prisma.$transaction(async (tx) => {
+        if (outcome.revision) await validateRevision(tx, accountId, outcome.revision);
         const email = await tx.email.upsert({
           where: {
             accountId_messageId: {

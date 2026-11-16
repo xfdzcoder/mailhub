@@ -1,4 +1,4 @@
-import { evaluateIncoming, imapSource, syncRevision } from '@/lib/email/incoming-rejections';
+import { validateRevision, evaluateIncoming, imapSource, syncRevision } from '@/lib/email/incoming-rejections';
 import { readImapIncoming, IMAP_RESPONSE_LIMITS, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import { ImapFlow, FetchMessageObject, type ImapFlowOptions, type MailboxLockObject, type MailboxObject } from 'imapflow';
 import type { Prisma } from '@prisma/client';
@@ -1102,6 +1102,7 @@ export class IMAPConnectionManager {
 
       // Persist email envelope, body, and attachment metadata in a short transaction.
       const email = await retryAsync(() => prisma.$transaction(async (tx) => {
+        if (outcome.revision) await validateRevision(tx, accountId, outcome.revision);
         const email = await tx.email.upsert({
           where: {
             accountId_messageId: {

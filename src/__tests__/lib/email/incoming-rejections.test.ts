@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db/prisma';
 import { Readable } from 'node:stream';
 
 jest.mock('@/lib/db/prisma', () => {
-  const tx = { $executeRaw: jest.fn().mockResolvedValue(0), incomingMailRejection: { deleteMany: jest.fn(), findFirst: jest.fn(), upsert: jest.fn() }, emailAccount: { update: jest.fn() } };
+  const tx = { $executeRaw: jest.fn().mockResolvedValue(0), incomingMailRejection: { deleteMany: jest.fn(), findFirst: jest.fn(), upsert: jest.fn() }, emailAccount: { update: jest.fn(), findUniqueOrThrow: jest.fn().mockResolvedValue({ updatedAt: new Date('2026-01-01') }), findFirst: jest.fn().mockResolvedValue({ id: 'synthetic-account' }) } };
   return { prisma: { ...tx, $transaction: jest.fn((fn) => fn(tx)) } };
 });
 const source = { accountId: 'synthetic-account', provider: 'gmail' as const, providerMessageId: 'synthetic-message' };
@@ -28,7 +28,7 @@ it('accounts for a deterministic rejection and suppresses a later read', async (
 it('does not account for a failed rejection write', async () => {
   (prisma.$executeRaw as jest.Mock).mockResolvedValueOnce(0).mockRejectedValueOnce(new Error('disk')); 
   await expect(evaluateIncoming(source, async () => { throw new IncomingPolicyError('message_size_limit'); })).resolves.toEqual({ kind: 'retryable', error: new Error('disk') });
-  await expect(evaluateIncoming(source, async () => 'ordinary')).resolves.toEqual({ kind: 'accepted', value: 'ordinary' });
+  await expect(evaluateIncoming(source, async () => 'ordinary')).resolves.toMatchObject({ kind: 'accepted', value: 'ordinary' });
 });
 it('removes expired identities before evaluation and scopes a resync', async () => {
   await evaluateIncoming(source, async () => 'ordinary');
@@ -66,4 +66,30 @@ it('refuses a superseded worker and reevaluates older policy evidence', async ()
   (db.findFirst as jest.Mock).mockResolvedValueOnce({ policyVersion: 1 });
   expect((await evaluateIncoming(source, read)).kind).toBe('accepted');
   expect(read).toHaveBeenCalledTimes(1);
+});
+
+it('revalidates generation after provider I/O and refuses stale rejection writes', async () => {
+  const read = jest.fn(async () => {
+    (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValueOnce(null);
+    throw new IncomingPolicyError('message_size_limit');
+  });
+  expect((await evaluateIncoming(source, read)).kind).toBe('retryable');
+  expect((prisma.$executeRaw as jest.Mock).mock.calls.some(call => call[0].join('?').includes('INSERT INTO'))).toBe(false);
+});
+
+it('finishes the suppression transaction before calling the provider', async () => {
+  let inTransaction = false;
+  const transaction = prisma.$transaction as jest.Mock;
+  const implementation = transaction.getMockImplementation();
+  transaction.mockImplementation(async fn => {
+    inTransaction = true;
+    try { return await implementation!(fn); }
+    finally { inTransaction = false; }
+  });
+  try {
+    await expect(evaluateIncoming(source, async () => {
+      expect(inTransaction).toBe(false);
+      return 'synthetic';
+    })).resolves.toMatchObject({ kind: 'accepted' });
+  } finally { transaction.mockImplementation(implementation!); }
 });

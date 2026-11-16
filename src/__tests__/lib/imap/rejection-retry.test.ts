@@ -22,6 +22,7 @@ type Access = { connections: Map<string, unknown>; persistEmail: (...args: unkno
 it('retries IMAP failures and persists successors after rejection and restart using actual mailbox identity', async () => {
   const rejected = new Set<string>();
   const tx = {
+    emailAccount: { findUniqueOrThrow: jest.fn().mockResolvedValue({ updatedAt: new Date('2026-01-01') }), findFirst: jest.fn().mockResolvedValue({ id: 'synthetic-account' }) },
     $executeRaw: jest.fn(async (sql: TemplateStringsArray, ...values: unknown[]) => {
       if (sql.join('?').includes('INSERT INTO incoming_mail_rejections')) rejected.add(`${values[2]}:${values[3]}:${values[4]}`);
       return 0;

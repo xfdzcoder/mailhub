@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/db/prisma';
 import { IncomingPolicyError } from './incoming-budget';
@@ -8,7 +9,7 @@ export type SourceIdentity = { accountId: string } & (
   { provider: 'gmail'; providerMessageId: string } |
   { provider: 'imap'; mailbox: string; uidValidity: bigint; uid: bigint }
 );
-export type IncomingOutcome<T> = { kind: 'accepted'; value: T } | { kind: 'rejected' } | { kind: 'retryable'; error: unknown };
+export type IncomingOutcome<T> = { kind: 'accepted'; value: T; revision?: Date } | { kind: 'rejected' } | { kind: 'retryable'; error: unknown };
 
 export function imapSource(accountId: string, mailbox: string, uidValidity: bigint, uid: bigint): Extract<SourceIdentity, { provider: 'imap' }> | null {
   if (!mailbox || mailbox.length > 1024 || Buffer.byteLength(mailbox) > 2048 ||
@@ -16,8 +17,7 @@ export function imapSource(accountId: string, mailbox: string, uidValidity: bigi
   return { accountId, provider: 'imap', mailbox: /^inbox$/i.test(mailbox) ? 'INBOX' : mailbox, uidValidity, uid };
 }
 
-// Serialize evaluation and explicit reset across processes, including workers
-// already parsing when a reset arrives. Errors roll back and remain retryable.
+// Keep provider I/O outside transactions; revalidate the reset revision on write.
 let startupCleanup: Promise<void> | undefined;
 
 export async function evaluateIncoming<T>(source: SourceIdentity | null, read: () => Promise<T>): Promise<IncomingOutcome<T>> {
@@ -28,7 +28,7 @@ export async function evaluateIncoming<T>(source: SourceIdentity | null, read: (
 async function evaluateLocked<T>(source: SourceIdentity | null, read: () => Promise<T>): Promise<IncomingOutcome<T>> {
   await (startupCleanup ??= cleanupIncomingRejections().catch(error => { startupCleanup = undefined; throw error; }));
   if (!source) return { kind: 'accepted', value: await read() };
-  return prisma.$transaction(async tx => {
+  const revision = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${source.accountId}, 50))`;
     const where = source.provider === 'gmail'
       ? { accountId: source.accountId, providerMessageId: source.providerMessageId }
@@ -37,11 +37,19 @@ async function evaluateLocked<T>(source: SourceIdentity | null, read: () => Prom
     await tx.incomingMailRejection.deleteMany({ where: { ...where, expiresAt: { lte: now } } });
     const existing = await tx.incomingMailRejection.findFirst({ where: { ...where, expiresAt: { gt: now } } });
     if (existing && existing.policyVersion > INCOMING_POLICY_VERSION) throw new Error('Incoming policy worker is superseded');
-    if (existing?.policyVersion === INCOMING_POLICY_VERSION) return { kind: 'rejected' };
-    try {
-      return { kind: 'accepted', value: await read() };
-    } catch (error) {
-      if (!(error instanceof IncomingPolicyError)) throw error;
+    if (existing?.policyVersion === INCOMING_POLICY_VERSION) return null;
+    const account = await tx.emailAccount.findUniqueOrThrow({ where: { id: source.accountId }, select: { updatedAt: true } });
+    return account.updatedAt;
+  });
+  if (!revision) return { kind: 'rejected' };
+  try {
+    const value = await read();
+    await prisma.$transaction(async tx => { await validateRevision(tx, source.accountId, revision); });
+    return { kind: 'accepted', value, revision };
+  } catch (error) {
+    if (!(error instanceof IncomingPolicyError)) throw error;
+    return prisma.$transaction(async tx => {
+      await validateRevision(tx, source.accountId, revision);
       const id = randomUUID();
       if (source.provider === 'gmail') {
         await tx.$executeRaw`INSERT INTO incoming_mail_rejections
@@ -60,9 +68,15 @@ async function evaluateLocked<T>(source: SourceIdentity | null, read: () => Prom
           reason_code = EXCLUDED.reason_code, policy_version = EXCLUDED.policy_version
           WHERE incoming_mail_rejections.policy_version <= EXCLUDED.policy_version`;
       }
-      return { kind: 'rejected' };
-    }
-  }, { maxWait: 120_000, timeout: 120_000 });
+      return { kind: 'rejected' as const };
+    });
+  }
+}
+
+export async function validateRevision(tx: Prisma.TransactionClient, accountId: string, revision: Date) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${accountId}, 50))`;
+  const account = await tx.emailAccount.findFirst({ where: { id: accountId, updatedAt: syncRevision(revision) }, select: { id: true } });
+  if (!account) throw new Error('Incoming sync generation changed');
 }
 
 /** Caller must authorize the account before invoking an explicit user resync. */
