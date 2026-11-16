@@ -1,5 +1,6 @@
 import { processAdmitted } from '@/lib/workload/processor';
 import { Worker, Job } from 'bullmq';
+import type { QueueOptions } from 'bullmq';
 import Redis from 'ioredis';
 import { redis as pubsubRedis } from '@/lib/redis';
 import { prisma } from '@/lib/db/prisma';
@@ -79,7 +80,7 @@ async function processSyncJob(
         // The backfill can be retried independently without stopping new mail
         // from being collected.
         console.log(`Worker: Starting Gmail polling for account ${accountId}`);
-        await gmailSyncManager.initializeAccount(account as any);
+        await gmailSyncManager.initializeAccount(account);
 
         const result = await gmailSyncManager.syncHistoricalEmails(accountId);
         if (result.failed > 0) {
@@ -90,7 +91,7 @@ async function processSyncJob(
         const status = imapManager.getStatus().find((s) => s.accountId === accountId);
         if (!status || !status.isConnected) {
           console.log(`Worker: Initializing IMAP connection for account ${accountId} before sync`);
-          await imapManager.initializeAccount(account as any);
+          await imapManager.initializeAccount(account);
         }
 
         if (!(await waitForImapConnection(accountId))) {
@@ -141,7 +142,7 @@ const createSyncWorker = (queueName: string, workerPartition: string, isLegacyQu
     queueName,
     (job) => processAdmitted(job, () => processSyncJob(job, isLegacyQueue, workerPartition)),
     {
-      connection: workerRedis as any,
+      connection: workerRedis as unknown as QueueOptions['connection'],
       concurrency: Math.max(2, runtimeConfig.syncWorkerConcurrency),
     }
   );

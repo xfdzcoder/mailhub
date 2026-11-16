@@ -1,3 +1,4 @@
+import { reconcileSendOperations } from '@/lib/workload/send-once';
 import { config } from 'dotenv';
 config();
 
@@ -10,6 +11,7 @@ import { closeSyncWorkers, ensureSyncWorkersForPartitions } from '@/lib/queue/wo
 import { searchWorker } from '@/lib/queue/workers/search';
 import { summaryWorker } from '@/lib/queue/workers/summary';
 import { gmailSyncManager } from '@/lib/gmail/sync-manager';
+import type { EmailAccount } from '@prisma/client';
 
 const WORKER_PARTITION = process.env.WORKER_PARTITION || 'default';
 const IMAP_STARTUP_CONCURRENCY = (() => {
@@ -18,7 +20,7 @@ const IMAP_STARTUP_CONCURRENCY = (() => {
 })();
 
 /** Open mailbox listeners promptly; historical sync is queued separately. */
-async function initializeImapConnections(accounts: any[]): Promise<void> {
+async function initializeImapConnections(accounts: EmailAccount[]): Promise<void> {
   const imapAccounts = accounts.filter((account) => account.provider !== 'gmail');
   let nextAccount = 0;
 
@@ -45,6 +47,18 @@ async function initializeImapConnections(accounts: any[]): Promise<void> {
 
 async function bootstrap() {
   console.log(`Bootstrapping Worker [Partition: ${WORKER_PARTITION}]`);
+
+  // Run before external dependencies so idle/restarting workers also reclaim rows.
+  await reconcileSendOperations();
+  let sweepingSends = false;
+  const sendMaintenance = setInterval(async () => {
+    if (sweepingSends) return;
+    sweepingSends = true;
+    try { await reconcileSendOperations(); }
+    catch (error) { console.error('Send operation maintenance failed:', error); }
+    finally { sweepingSends = false; }
+  }, 60000);
+  sendMaintenance.unref();
 
   // 1. Initialize dependencies
   await initMeilisearch();
@@ -95,6 +109,7 @@ async function bootstrap() {
   const shutdown = async () => {
     console.log('SIGTERM received. Shutting down worker...');
     clearInterval(heartbeat);
+    clearInterval(sendMaintenance);
     await closeSyncWorkers();
     await searchWorker.close();
     await summaryWorker.close();

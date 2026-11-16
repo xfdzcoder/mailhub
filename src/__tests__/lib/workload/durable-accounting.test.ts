@@ -9,7 +9,7 @@ import { createServer, type Socket } from 'node:net';
 import { prisma } from '@/lib/db/prisma';
 import { stageOutgoingFiles } from '@/lib/email/outgoing-files';
 import { attachmentRoot, reserveAttachment, publishAttachment, releaseAttachment, reconcileAttachmentAccounting } from '@/lib/email/attachment-accounting';
-import { claimSend } from '@/lib/workload/send-once';
+import { claimSend, reconcileSendOperations, sendOperationLimits } from '@/lib/workload/send-once';
 import { sendEmail } from '@/lib/smtp/sender';
 import { getDecryptedAccount } from '@/lib/accounts/service';
 
@@ -174,6 +174,68 @@ integration('durable accounting and send replay on disposable PostgreSQL and SMT
     expect(await prisma.email.count()).toBe(0);
     expect(await prisma.sendOperation.count()).toBe(0);
     expect(await redis!.zcard(budgetKeys(principal, 'queued')[0])).toBe(0);
+  });
+
+  test('preparation recovery fences stale callbacks, races and expired live holders', async () => {
+    const principal = { organizationId: owner.organizationId, userId };
+    const input = { subject: 'Synthetic recovery' };
+    const stale = await claimSend(principal, owner.accountId, 'abandoned', input);
+    await expect(claimSend(principal, owner.accountId, 'abandoned', input)).rejects.toThrow('already attempted');
+    await prisma.sendOperation.updateMany({ data: { preparationExpiresAt: new Date(0) } });
+    await expect(stale.beforeDelivery()).rejects.toThrow('fenced');
+    await expect(claimSend(principal, owner.accountId, 'abandoned', { subject: 'different' })).rejects.toThrow('different content');
+    const raced = await Promise.allSettled(Array.from({ length: 20 }, () => claimSend(principal, owner.accountId, 'abandoned', input)));
+    const winners = raced.filter(result => result.status === 'fulfilled');
+    expect(winners).toHaveLength(1);
+    const current = (winners[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof claimSend>>>).value;
+    await stale.failedBeforeDelivery();
+    await stale.delivered('stale-message');
+    await expect(stale.beforeDelivery()).rejects.toThrow('fenced');
+    await current.beforeDelivery();
+    await current.failedBeforeDelivery(new Error('uncertain'));
+    await reconcileSendOperations();
+    expect(await prisma.sendOperation.findFirstOrThrow()).toMatchObject({ state: 'DELIVERING', messageId: null });
+    await expect(claimSend(principal, owner.accountId, 'abandoned', input)).rejects.toThrow('already attempted');
+  });
+
+  test('retention caps all states and never evicts uncertainty within its replay window', async () => {
+    const principal = { organizationId: owner.organizationId, userId };
+    const input = { subject: 'Synthetic retention' };
+    const oldCap = sendOperationLimits.retainedPerOrganization;
+    sendOperationLimits.retainedPerOrganization = 4;
+    try {
+      for (const state of ['PREPARING', 'RETRYABLE', 'DELIVERING', 'DELIVERED']) {
+        await claimSend(principal, owner.accountId, state, input);
+        await prisma.sendOperation.updateMany({ where: { operationKey: state }, data: { state } });
+      }
+      await expect(claimSend(principal, owner.accountId, 'over-cap', input)).rejects.toThrow('Too many retained');
+      await prisma.sendOperation.updateMany({ data: { preparationExpiresAt: new Date(0) } });
+      await reconcileSendOperations();
+      expect(await prisma.sendOperation.count()).toBe(4);
+      await expect(claimSend(principal, owner.accountId, 'DELIVERING', input)).rejects.toThrow('already attempted');
+      await prisma.sendOperation.updateMany({ data: { expiresAt: new Date(0) } });
+      expect(await reconcileSendOperations()).toMatchObject({ removed: 4 });
+      expect(await reconcileSendOperations()).toEqual({ removed: 0, recovered: 0 });
+      await claimSend(principal, owner.accountId, 'over-cap', input);
+    } finally { sendOperationLimits.retainedPerOrganization = oldCap; }
+  });
+
+  test('maintenance processes finite batches and preserves a live preparation even with old retention', async () => {
+    await prisma.sendOperation.createMany({ data: Array.from({ length: 501 }, (_, i) => ({
+      ...owner, userId, id: randomUUID(), operationKey: `expired-${i}`, payloadHash: 'fixture', generation: randomUUID(),
+      state: 'DELIVERED', expiresAt: new Date(0), preparationExpiresAt: new Date(0),
+    })) });
+    expect(await reconcileSendOperations()).toEqual({ removed: 500, recovered: 0 });
+    expect(await prisma.sendOperation.count()).toBe(1);
+    const principal = { organizationId: owner.organizationId, userId };
+    await claimSend(principal, owner.accountId, 'live-preparation', {});
+    await prisma.sendOperation.updateMany({ where: { operationKey: 'live-preparation' }, data: { expiresAt: new Date(0) } });
+    // claimSend removes the remaining expired row, preserving the live holder.
+    expect(await prisma.sendOperation.count()).toBe(1);
+    expect(await reconcileSendOperations()).toEqual({ removed: 0, recovered: 0 });
+    expect(await prisma.sendOperation.findFirstOrThrow()).toMatchObject({ state: 'PREPARING', operationKey: 'live-preparation' });
+    await prisma.sendOperation.updateMany({ data: { preparationExpiresAt: new Date(0) } });
+    expect(await reconcileSendOperations()).toEqual({ removed: 1, recovered: 0 });
   });
 
   test('explicit operation replay permits independent identical sends and definite pre-delivery retries, blocks ambiguous SMTP outcomes', async () => {

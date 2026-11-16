@@ -1,5 +1,7 @@
 import { callLlmApi } from '@/lib/ai/llm-client';
 
+const SUMMARY_PROVIDER_TIMEOUT_MS = 180_000;
+
 export interface EmailForSummary {
   id: string;
   subject?: string | null;
@@ -99,7 +101,7 @@ export async function generateEmailBatchSummary(
     return `No emails found under label **${labelName}** to summarize.`;
   }
 
-  const systemInstruction = customPrompt || 
+  const systemInstruction = customPrompt?.trim() ||
     `You are an executive email assistant. Summarize the provided batch of emails for the label "${labelName}". Provide a concise overview, key highlights, and action items in clean Markdown format with bullet points.`;
 
   // If batch size exceeds chunkSize, execute Map-Reduce
@@ -114,7 +116,7 @@ export async function generateEmailBatchSummary(
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
       const formattedChunk = formatEmailsForPrompt(chunk);
-      const chunkUserPrompt = `Please generate a concise bullet-point summary for batch #${i + 1} (${chunk.length} emails) under label "${labelName}":\n\n${formattedChunk}`;
+      const chunkUserPrompt = `Email batch #${i + 1} of ${chunks.length} for label "${labelName}" (${chunk.length} emails). Follow the system instructions when summarizing:\n\n${formattedChunk}`;
       
       const chunkSummary = await callLlmApi({
         organizationId,
@@ -124,13 +126,14 @@ export async function generateEmailBatchSummary(
         modelName,
         systemInstruction,
         userPrompt: chunkUserPrompt,
+        timeoutMs: SUMMARY_PROVIDER_TIMEOUT_MS,
       });
       chunkSummaries.push(`### Batch #${i + 1} Summary:\n${chunkSummary}`);
     }
 
     // Reduce Phase: Synthesize chunk summaries into final executive summary
     const combinedChunkSummaries = chunkSummaries.join('\n\n');
-    const reduceUserPrompt = `Below are ${chunkSummaries.length} batch summaries for a total of ${emails.length} emails under label "${labelName}". Synthesize them into a single cohesive executive summary with key highlights and action items in clean Markdown format:\n\n${combinedChunkSummaries}`;
+    const reduceUserPrompt = `Below are ${chunkSummaries.length} summaries covering ${emails.length} emails under label "${labelName}". Produce the final summary by following the system instructions:\n\n${combinedChunkSummaries}`;
 
     return await callLlmApi({
       organizationId,
@@ -140,12 +143,13 @@ export async function generateEmailBatchSummary(
       modelName,
       systemInstruction,
       userPrompt: reduceUserPrompt,
+      timeoutMs: SUMMARY_PROVIDER_TIMEOUT_MS,
     });
   }
 
   // Single-Pass Summarization for small email batches
   const formattedEmails = formatEmailsForPrompt(emails);
-  const userPrompt = `Please summarize the following ${emails.length} email(s) under the label "${labelName}":\n\n${formattedEmails}`;
+  const userPrompt = `Summarize these ${emails.length} emails under the label "${labelName}" by following the system instructions:\n\n${formattedEmails}`;
 
   return await callLlmApi({
     organizationId,
@@ -155,5 +159,6 @@ export async function generateEmailBatchSummary(
     modelName,
     systemInstruction,
     userPrompt,
+    timeoutMs: SUMMARY_PROVIDER_TIMEOUT_MS,
   });
 }

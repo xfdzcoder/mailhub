@@ -44,7 +44,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       nextCursor: emails.length === 32 ? emails[emails.length - 1].id : null,
       message: `Successfully queued ${emails.length} emails for search reindexing.`
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Failed to reindex account:', error);
     return apiError(error instanceof AdmissionError ? error.message : 'Internal server error', error instanceof AdmissionError ? (error.unavailable ? 503 : 429) : 500);
   }

@@ -12,6 +12,8 @@ const policyEnvironment: Record<OutboundPurpose, string> = {
   push: 'PUSH_ORIGIN_POLICY',
 };
 
+export class OutboundTimeoutError extends Error {}
+
 export class OriginPolicyError extends Error {
   constructor(purpose: OutboundPurpose = 'model') {
     super(`Outbound ${purpose} destination is not approved. Ask the instance operator to configure ${policyEnvironment[purpose]}; ${purpose === 'model' ? 'custom model endpoints require a tenant API key or no key.' : 'notification approval is separate from model approval.'}`);
@@ -124,7 +126,7 @@ async function requestWithPolicy(purpose: OutboundPurpose, endpoint: string, hea
   // The total deadline includes DNS resolution and body consumption.
   const signal = AbortSignal.timeout(limits.totalMs);
   const target = await new Promise<Awaited<ReturnType<typeof resolveModelTarget>>>((resolve, reject) => {
-    const abort = () => reject(new Error('Outbound request deadline exceeded'));
+    const abort = () => reject(new OutboundTimeoutError('Outbound request deadline exceeded'));
     signal.addEventListener('abort', abort, { once: true });
     resolveOriginTarget(purpose, url).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
@@ -150,12 +152,14 @@ async function requestWithPolicy(purpose: OutboundPurpose, endpoint: string, hea
           response.destroy(new Error('Outbound response limit exceeded'));
         } else if (collectBody) chunks.push(chunk);
       });
-      response.on('error', reject);
+      response.on('error', error => {
+        reject(signal.aborted ? new OutboundTimeoutError('Outbound request deadline exceeded') : error);
+      });
       response.on('end', () => {
         resolve({ status: response.statusCode!, body: Buffer.concat(chunks).toString('utf8') });
       });
     });
-    const timer = setTimeout(() => request.destroy(new Error('Outbound connection deadline exceeded')), limits.connectMs);
+    const timer = setTimeout(() => request.destroy(new OutboundTimeoutError('Outbound connection deadline exceeded')), limits.connectMs);
     request.on('socket', socket => socket.once(url.protocol === 'https:' ? 'secureConnect' : 'connect', () => {
       clearTimeout(timer);
       const remote = socket.remoteAddress?.replace(/^::ffff:/, '');
@@ -164,7 +168,9 @@ async function requestWithPolicy(purpose: OutboundPurpose, endpoint: string, hea
       if (!remote || !range || !cidrContains(range, remote)) request.destroy(new OriginPolicyError(purpose));
     }));
     request.on('close', () => clearTimeout(timer));
-    request.on('error', reject);
+    request.on('error', error => {
+      reject(signal.aborted ? new OutboundTimeoutError('Outbound request deadline exceeded') : error);
+    });
     request.end(body);
   });
 }

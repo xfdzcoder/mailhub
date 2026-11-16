@@ -1,12 +1,17 @@
-import { modelPostJson, modelUrl, OriginPolicyError } from '@/lib/network/origin-policy';
+import { modelPostJson, modelUrl, OriginPolicyError, OutboundTimeoutError } from '@/lib/network/origin-policy';
 import { prisma } from '@/lib/db/prisma';
 import { getSystemPreferences } from '@/lib/settings/system-preferences';
 
-export type AiUnavailableReason = 'disabled' | 'provider_unavailable';
+export type AiUnavailableReason = 'disabled' | 'provider_unavailable' | 'timeout';
 
 export class AiUnavailableError extends Error {
   constructor(public readonly reason: AiUnavailableReason, guidance?: string) {
-    super(guidance || (reason === 'disabled' ? 'AI is disabled for this organization or member' : 'AI provider is unavailable'));
+    const message = {
+      disabled: 'AI is disabled for this organization',
+      provider_unavailable: 'AI provider is unavailable',
+      timeout: 'AI provider request timed out',
+    }[reason];
+    super(guidance || message);
     this.name = 'AiUnavailableError';
   }
 }
@@ -28,6 +33,7 @@ export interface LlmCallArgs {
   systemInstruction: string;
   userPrompt: string;
   responseFormatJson?: boolean;
+  timeoutMs?: number;
 }
 
 export async function getResolvedAiConfig(organizationId: string, userId?: string) {
@@ -37,14 +43,14 @@ export async function getResolvedAiConfig(organizationId: string, userId?: strin
     userId
       ? prisma.organizationMember.findUnique({
           where: { organizationId_userId: { organizationId, userId } },
-          select: { personalAiEnabled: true },
+          select: { userId: true },
         })
       : Promise.resolve(undefined),
   ]);
 
   if (!systemPreferences.isAiEnabled) throw new AiUnavailableError('disabled');
   if (userId && !member) throw new AiAccessError();
-  if (setting?.isAiEnabled === false || member?.personalAiEnabled === false) {
+  if (setting?.isAiEnabled === false) {
     throw new AiUnavailableError('disabled');
   }
 
@@ -120,7 +126,15 @@ export async function callLlmApi(args: LlmCallArgs): Promise<string> {
     // Shared credentials are never inherited by tenant-selected endpoints.
     if (!apiKey && !tenantEndpoint && origin === sharedOrigin) apiKey = sharedKey;
     if (apiKey) headers[provider === 'claude' ? 'x-api-key' : 'Authorization'] = provider === 'claude' ? apiKey : `Bearer ${apiKey}`;
-    const data = await modelPostJson(endpoint, headers, JSON.stringify(payload)) as {
+    const body = JSON.stringify(payload);
+    const response = args.timeoutMs === undefined
+      ? await modelPostJson(endpoint, headers, body)
+      : await modelPostJson(endpoint, headers, body, {
+        connectMs: 5_000,
+        totalMs: args.timeoutMs,
+        responseBytes: 2 * 1024 * 1024,
+      });
+    const data = response as {
       content?: Array<{ type: string; text?: string }>;
       choices?: Array<{ message?: { content?: string } }>;
     };
@@ -133,6 +147,7 @@ export async function callLlmApi(args: LlmCallArgs): Promise<string> {
     return content;
   } catch (error) {
     if (error instanceof AiUnavailableError) throw error;
+    if (error instanceof OutboundTimeoutError) throw new AiUnavailableError('timeout');
     throw new AiUnavailableError('provider_unavailable', error instanceof OriginPolicyError ? error.message : undefined);
   }
 }

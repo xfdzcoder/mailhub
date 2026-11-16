@@ -86,7 +86,7 @@ describe('POST /api/accounts/test-credentials', () => {
     mockImapFlow.mockImplementation(() => ({
       connect: mockConnect,
       logout: mockLogout,
-    }) as any);
+    }) as unknown as InstanceType<typeof ImapFlow>);
 
     const mockVerify = jest.fn().mockResolvedValue(true);
     mockCreateTransport.mockReturnValue({
@@ -121,7 +121,7 @@ describe('POST /api/accounts/test-credentials', () => {
     mockImapFlow.mockImplementation(() => ({
       connect: mockConnect,
       logout: mockLogout,
-    }) as any);
+    }) as unknown as InstanceType<typeof ImapFlow>);
 
     const mockVerify = jest.fn().mockResolvedValue(true);
     mockCreateTransport.mockReturnValue({
@@ -158,7 +158,7 @@ describe('POST /api/accounts/test-credentials', () => {
     mockImapFlow.mockImplementation(() => ({
       connect: jest.fn().mockRejectedValue(new Error('Invalid IMAP credentials')),
       logout: jest.fn(),
-    }) as any);
+    }) as unknown as InstanceType<typeof ImapFlow>);
 
     mockCreateTransport.mockReturnValue({
       verify: jest.fn().mockResolvedValue(true),

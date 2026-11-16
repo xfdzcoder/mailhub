@@ -1,11 +1,14 @@
 # PR #49 follow-up validation
 
-This continuation remains draft. Git integration with `origin/dev` failed because
-ORIG_HEAD is on a read-only filesystem. No metadata repair was attempted. The #48
-outgoing helpers, bounded send/draft paths and regression fixtures, and #61's
-accounting migration/models/contract were copied from the available `origin/dev`
-source for compatibility testing. Resolve the dev merge manually before review;
-no branch, issue, PR, deployment or production migration was created here.
+This continuation remains draft. The source tree integrates current `dev`
+(`6d63cd2a5ba9fbfdb561c889b1633ef5510f5451`, verified against GitHub).
+Fetch/merge could not update FETCH_HEAD/ORIG_HEAD because the worktree Git metadata
+is mounted read-only. No metadata repair was attempted; a Git ancestry merge still
+requires manual resolution. Dev-only changes were integrated verbatim, with
+three-way conflict resolution preserving the workload changes and dev contracts.
+The released #61 migration is byte-for-byte unchanged (SHA-256
+`5bf05b5cf82d19194388bba1329ce81643a4cd17bf954434bf99540e8f7657ec`).
+Send deadlines/indexes use a new additive migration. No deployment was performed.
 
 ## Adopted behavior
 
@@ -56,8 +59,33 @@ pre-delivery exceptions, SMTP authentication failures and known connection-stage
 failures permit same-ID retries. Partial recipient acceptance, lost final SMTP
 acknowledgements, generic network failures and crashes in DELIVERING never
 implicitly retry. Gmail delivery disables the generic HTTP response retry loop.
-PREPARING crashes and uncertain deliveries require investigation; there is no
-automatic age-based reset. A tenant may have at most 1,000 unresolved operations.
+An abandoned PREPARING operation can be reclaimed after its persisted preparation
+deadline (default 10 minutes). Recovery rotates the generation under a conditional
+update; the old holder cannot transition to delivery, release the new claim, or
+record its completion. The delivery transition checks the deadline atomically
+using PostgreSQL time. Recovery alone does not send anything: an explicit same-ID,
+same-content retry is required. DELIVERING is never reset by age or Redis loss.
+
+All states count toward a default 1,000 retained operations per organization;
+admission never evicts an unexpired marker. Retention defaults to seven days,
+persisted from claim/retry and refreshed immediately before delivery. Thus an
+uncertain delivery remains protected for the full replay window from the delivery
+attempt. Successful completion does not shorten that deadline. After expiry,
+operation identities may be reused: clients must use fresh IDs for new sends and
+must not retry old requests outside the replay window. Existing markers receive a
+full seven-day window on migration; existing preparation receives ten minutes.
+Stop older API/worker processes before adopting this protocol, since they do not
+check preparation deadlines.
+
+`WORK_SEND_PREPARATION_MS` accepts 1,000–3,600,000; `WORK_SEND_REPLAY_MS` accepts
+3,600,000–2,592,000,000; `WORK_SEND_RETAINED_PER_ORG` accepts 1–100,000. Invalid
+values use defaults. Keep configuration consistent across API/worker processes.
+Changing configuration does not shorten already-persisted replay deadlines.
+The worker sweeps at startup and every minute, deleting at most 500 expired rows
+and recovering at most 500 abandoned preparations per pass. Claim admission also
+cleans at most 500 expired rows for its organization. Concurrent sweepers skip
+locked rows. No live preparation or unexpired delivery marker is deleted; idle
+tenants are cleaned by the worker without needing new sends.
 
 ## Repeat isolated verification
 
@@ -76,19 +104,29 @@ npx prisma migrate deploy
 npx jest --runInBand --forceExit src/__tests__/lib/workload/durable-accounting.test.ts src/__tests__/lib/workload/admission-redis.test.ts
 ```
 
-Verified with Node 22.23.4, PostgreSQL 15.20 and Redis 7.0.15: 16 integration scenarios,
-including synthetic 20-way storage/send contention, duplicate release, real-byte
-budget denial, shared aliases, rollback cleanup, crash recovery, expiry fencing,
-unowned/symlink readiness denial, actual database writes denied after Redis lease
-loss, SMTP socket cancellation before DATA, independent identical sends, definitive
-pre-delivery/authentication retries, partial recipient acceptance, and accepted DATA
-with a dropped final acknowledgement. `--forceExit` closes Jest after assertions;
-the application pool/Bull infrastructure retains process handles. No live mail or
-production services are involved. The feature has no visual layout change, so no
-preview files are required.
+The disposable fixtures cover synthetic 20-way storage/send/recovery contention,
+real-byte budgets, expiry fencing, stale callbacks, finite 500-row sweeps,
+all-state retention limits, SMTP acceptance with dropped acknowledgements,
+partial acceptance, and Redis lease loss. The restart suite launches separate
+processes that abandon preparation and persist delivery uncertainty, restarts both
+PostgreSQL and Redis, then verifies preparation recovery and blocked delivery
+replay from fresh processes. Run that suite in its own Jest process so unrelated
+application pools do not remain connected during the deliberate database restart:
 
-Final checks: all 871 tests across 122 suites with both Redis opt-ins and the
-PostgreSQL opt-in enabled; TypeScript; ESLint (zero errors, 83 existing warnings);
-and production build against disposable services. An initial full run hit the
-existing JWT collection-time expiry-boundary test flake; a repeat passed without
-changing that unrelated test or authentication code.
+```sh
+export WORKLOAD_TEST_PG_CTL=/path/to/pg_ctl
+export WORKLOAD_TEST_PG_DATA=/tmp/mailhub-disposable/pgdata
+npx jest --runInBand --forceExit src/__tests__/lib/workload/send-restart.test.ts
+```
+
+The restart opt-in requires a loopback `_test` database and a `/tmp/mailhub-*`
+cluster directory. Omit the PostgreSQL restart variables for the regular full
+suite. All fixtures use synthetic data, private Redis instances and loopback SMTP;
+no production services or live mail are involved. This follow-up has no visual
+layout change, so no preview files are required.
+
+Verified on Node 24.22.3, PostgreSQL 15.20 and Redis 7.0.15: 866 Jest tests
+passed in the full run (12 opt-in tests skipped), plus the separately run restart
+test and three tooling compatibility checks. TypeScript, ESLint and production
+build passed. Migrations deployed successfully twice, with the second deployment
+reporting no pending migrations. Disposable services were stopped after testing.

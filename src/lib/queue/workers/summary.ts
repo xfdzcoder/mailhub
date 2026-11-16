@@ -1,6 +1,7 @@
 import { assertWorkLease } from '@/lib/workload/admission';
 import { processAdmitted } from '@/lib/workload/processor';
 import { Worker, Job } from 'bullmq';
+import type { QueueOptions } from 'bullmq';
 import Redis from 'ioredis';
 import { prisma } from '@/lib/db/prisma';
 import { meilisearch } from '@/lib/search/meilisearch';
@@ -162,13 +163,13 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
         filterParts.push(`receivedAt >= ${minTimestamp}`);
       }
 
-      const searchRes = await meilisearch.index('emails').search('', {
+      const searchRes = await meilisearch.index<{ id: string }>('emails').search('', {
         filter: filterParts.join(' AND '),
         sort: ['receivedAt:desc'],
         limit: limit && limit > 0 ? limit : 100,
       });
 
-      emailIdsFromMeilisearch = (searchRes.hits || []).map((hit: any) => hit.id);
+      emailIdsFromMeilisearch = (searchRes.hits || []).map((hit) => hit.id);
     } catch (searchError) {
       console.warn('Meilisearch email query failed, falling back to PostgreSQL query:', searchError);
     }
@@ -292,6 +293,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
 
     let summaryText: string;
     let usedFallback = !aiEnabled;
+    let fallbackReason: AiUnavailableError['reason'] | null = aiEnabled ? null : 'disabled';
     if (aiEnabled) {
       try {
         await assertWorkLease();
@@ -308,6 +310,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
       } catch (error) {
         if (!(error instanceof AiUnavailableError)) throw error;
         usedFallback = true;
+        fallbackReason = error.reason;
         summaryText = generateFallbackEmailBatchDigest({ labelName, emails: emailsToSummarize });
       }
     } else {
@@ -318,7 +321,13 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
       id: 'step-ai',
       step: 'AI_SUMMARIZING',
       title: usedFallback ? 'Basic summary completed' : 'AI synthesis completed',
-      detail: `Generated ${usedFallback ? 'basic' : 'AI'} summary (${summaryText.length} characters).`,
+      detail: usedFallback
+        ? fallbackReason === 'timeout'
+          ? `The AI provider timed out; generated a basic summary (${summaryText.length} characters).`
+          : fallbackReason === 'disabled'
+            ? `AI is disabled; generated a basic summary (${summaryText.length} characters).`
+            : `The AI provider was unavailable; generated a basic summary (${summaryText.length} characters).`
+        : `Generated AI summary (${summaryText.length} characters).`,
       status: 'completed',
     });
 
@@ -363,7 +372,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
         for (const webhook of webhooks) {
           await assertWorkLease();
           const dispatchRes = await dispatchWebhookNotification({
-            type: webhook.type as any,
+            type: webhook.type as import('@/lib/notifications/types').WebhookType,
             config: webhook.config,
             labelName,
             summaryText,
@@ -388,7 +397,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
       where: { id: summaryRunId },
       data: {
         status: 'COMPLETED',
-        webhookLogs: webhookLogs as any,
+        webhookLogs: webhookLogs as unknown as import('@prisma/client').Prisma.InputJsonValue,
       },
     });
 
@@ -418,7 +427,7 @@ export const summaryWorker = new Worker<SummaryJobPayload>(
     await processAdmitted(job, () => executeSummaryRun(job.data));
   },
   {
-    connection: workerRedis as any,
+    connection: workerRedis as unknown as QueueOptions['connection'],
     concurrency: 5,
   }
 );
