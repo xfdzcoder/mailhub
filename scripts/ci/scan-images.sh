@@ -19,8 +19,7 @@ for target in runtime migrate; do
   if ! docker image inspect "$image" > "$output/$target-image.json"; then status=1; continue; fi
   if ! docker run --rm --entrypoint sh "$image" -ec '
     node --version
-    ! command -v npm
-    ! command -v npx
+    if command -v npm || command -v npx; then exit 1; fi
     cat /etc/alpine-release
     apk info -vv
     apk info -L zlib
