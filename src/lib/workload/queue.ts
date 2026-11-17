@@ -39,4 +39,3 @@ export class AdmittedQueue extends Queue {
     }
   }
 }
-
