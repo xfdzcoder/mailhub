@@ -10,9 +10,8 @@ interface AiSettings {
   isAiEnabled: boolean;
   systemAiEnabled: boolean;
   aiProvider: string;
-  aiApiKeyMasked: string;
   hasApiKey: boolean;
-  aiBaseUrl?: string | null;
+  hasBaseUrl?: boolean;
   aiModelName: string;
   aiCustomPrompt?: string | null;
 }
@@ -76,7 +75,7 @@ export default function AiSettingsPage() {
       isAiEnabled,
       aiProvider: formData.get('aiProvider'),
       aiModelName: formData.get('aiModelName'),
-      aiBaseUrl: (formData.get('aiBaseUrl') as string) || null,
+      ...(formData.get('aiBaseUrl') ? { aiBaseUrl: formData.get('aiBaseUrl') as string } : {}),
       aiCustomPrompt: (formData.get('aiCustomPrompt') as string) || null,
       ...(apiKeyInput ? { aiApiKey: apiKeyInput } : {}),
     });
@@ -138,7 +137,7 @@ export default function AiSettingsPage() {
 
           <div>
             <label htmlFor="aiApiKey" className="mb-2 block text-xs font-semibold uppercase tracking-wider text-gray-700">
-              API Key {settings?.hasApiKey && <span className="ml-2 text-xs font-normal text-green-600">(Configured: {settings.aiApiKeyMasked})</span>}
+              API Key {settings?.hasApiKey && <span className="ml-2 text-xs font-normal text-green-600">(Configured)</span>}
             </label>
             <div className="relative">
               <input id="aiApiKey" type={showApiKey ? 'text' : 'password'} value={apiKeyInput} onChange={(event) => setApiKeyInput(event.target.value)} placeholder={settings?.hasApiKey ? 'Leave blank to keep the existing key' : 'Enter API key (optional for local LLMs)'} className="w-full rounded-md border border-gray-300 p-2.5 pr-10 text-sm" />
@@ -150,7 +149,7 @@ export default function AiSettingsPage() {
 
           <div>
             <label htmlFor="aiBaseUrl" className="mb-2 block text-xs font-semibold uppercase tracking-wider text-gray-700">Local / Custom Base URL</label>
-            <input id="aiBaseUrl" name="aiBaseUrl" defaultValue={settings?.aiBaseUrl || ''} placeholder="e.g. http://localhost:11434/v1" className="w-full rounded-md border border-gray-300 p-2.5 text-sm" />
+            <input id="aiBaseUrl" name="aiBaseUrl" placeholder={settings?.hasBaseUrl ? 'Configured; leave blank to keep existing endpoint' : 'e.g. http://localhost:11434/v1'} className="w-full rounded-md border border-gray-300 p-2.5 text-sm" />
           </div>
 
           <div>
