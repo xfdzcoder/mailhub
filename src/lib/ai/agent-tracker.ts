@@ -83,8 +83,8 @@ export async function initAgentRun(
     if (redis && typeof redis.set === 'function') {
       await redis.set(getKey(runId), JSON.stringify(state), 'EX', TTL_SECONDS);
     }
-  } catch (err) {
-    console.warn('Failed to save initial agent state to Redis:', err);
+  } catch {
+    console.warn('Failed to save initial agent state to Redis');
   }
 
   return state;
@@ -148,8 +148,8 @@ export async function updateAgentStep(
     }
 
     return state;
-  } catch (err) {
-    console.warn(`Failed to update agent step for run ${runId}:`, err);
+  } catch {
+    console.warn(`Failed to update agent step for run ${runId}`);
     return null;
   }
 }
@@ -162,8 +162,8 @@ export async function getAgentRunState(runId: string): Promise<AgentRunState | n
         return JSON.parse(data) as AgentRunState;
       }
     }
-  } catch (err) {
-    console.warn(`Failed to get agent state from Redis for run ${runId}:`, err);
+  } catch {
+    console.warn(`Failed to get agent state from Redis for run ${runId}`);
   }
   return null;
 }

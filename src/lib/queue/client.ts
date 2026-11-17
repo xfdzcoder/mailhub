@@ -1,4 +1,5 @@
 import { Queue, QueueOptions } from 'bullmq';
+import { AdmittedQueue } from '@/lib/workload/queue';
 import Redis from 'ioredis';
 import { getInitialSyncJobId, getSyncQueueName } from '@/lib/queue/identifiers';
 
@@ -8,7 +9,10 @@ const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 
 const defaultOptions: QueueOptions = {
   connection: new Redis(redisUrl, {
-    maxRetriesPerRequest: null,
+    maxRetriesPerRequest: 0,
+    enableOfflineQueue: false,
+    commandTimeout: 1500,
+    connectTimeout: 1000,
     enableReadyCheck: false,
     lazyConnect: true,
     retryStrategy(times) {
@@ -28,11 +32,11 @@ const defaultOptions: QueueOptions = {
 };
 
 // Queues
-export const syncQueue = new Queue('imap-sync', defaultOptions);
-export const searchQueue = new Queue('search-index', defaultOptions);
-export const emailSendQueue = new Queue('email-send', defaultOptions);
+export const syncQueue = new AdmittedQueue('imap-sync', defaultOptions);
+export const searchQueue = new AdmittedQueue('search-index', defaultOptions);
+export const emailSendQueue = new AdmittedQueue('email-send', defaultOptions);
 export const workerHealthQueue = new Queue('worker-health', defaultOptions);
-export const summaryQueue = new Queue('email-summary', defaultOptions);
+export const summaryQueue = new AdmittedQueue('email-summary', defaultOptions);
 
 const partitionSyncQueues = new Map<string, Queue>();
 
@@ -46,7 +50,7 @@ export function getSyncQueue(workerPartition: string | null | undefined): Queue 
   const existingQueue = partitionSyncQueues.get(partition);
   if (existingQueue) return existingQueue;
 
-  const queue = new Queue(getSyncQueueName(partition), defaultOptions);
+  const queue = new AdmittedQueue(getSyncQueueName(partition), defaultOptions);
   partitionSyncQueues.set(partition, queue);
   return queue;
 }

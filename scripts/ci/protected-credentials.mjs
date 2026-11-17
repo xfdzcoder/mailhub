@@ -29,6 +29,7 @@ try {
   await admin.connect();
   await cp('prisma', join(temporary, 'prisma'), { recursive: true });
   await rm(join(temporary, 'prisma/migrations', migration), { recursive: true });
+  await rm(join(temporary, 'prisma/migrations/20261115000000_guard_protected_credentials'), { recursive: true });
   const config = join(temporary, 'prisma.config.ts');
   await writeFile(config, `import { defineConfig } from 'prisma/config';
 export default defineConfig({schema: ${JSON.stringify(join(temporary, 'prisma/schema.prisma'))},

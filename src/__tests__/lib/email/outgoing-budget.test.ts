@@ -1,3 +1,10 @@
+jest.mock('@/lib/email/attachment-accounting', () => ({
+  storageKey: (filename: string) => filename,
+  reserveAttachment: jest.fn(async () => ({ id: 'synthetic-reservation' })),
+  publishAttachment: async (_reservation: unknown, publish: () => Promise<void>) => publish(),
+  commitAttachment: async () => {}, releaseAttachment: async () => {},
+  cleanupAttachment: async (_reservation: unknown, filename: string) => { await (await import('fs/promises')).unlink(filename); },
+}));
 import { createTransport } from 'nodemailer';
 import { simpleParser } from 'mailparser';
 import { decodedLength, outgoingLimits, readOutgoingJson, validateOutgoingMail, validateRawOutgoing } from '@/lib/email/outgoing-budget';
@@ -82,14 +89,14 @@ describe('outgoing budgets', () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'mailhub-stage-'));
     const cwd = jest.spyOn(process, 'cwd').mockReturnValue(dir);
     try {
-      const staged = await stageOutgoingFiles([attachment('YWJj')]);
+      const staged = await stageOutgoingFiles([attachment('YWJj')], undefined, { organizationId: 'synthetic', accountId: 'synthetic' });
       expect(await readFile(staged.files[0].storagePath)).toEqual(Buffer.from('abc'));
       expect(staged.files[0].sizeBytes).toBe(3);
       await staged.cleanup();
       expect(await readdir(path.join(dir, '.storage', 'attachments'))).toEqual([]);
       await rm(path.join(dir, '.storage', 'attachments'), { recursive: true });
       await writeFile(path.join(dir, '.storage', 'attachments'), 'blocks directory');
-      await expect(stageOutgoingFiles([attachment('YWJj')])).rejects.toThrow();
+      await expect(stageOutgoingFiles([attachment('YWJj')], undefined, { organizationId: 'synthetic', accountId: 'synthetic' })).rejects.toThrow();
     } finally { cwd.mockRestore(); await rm(dir, { recursive: true, force: true }); }
   });
 });

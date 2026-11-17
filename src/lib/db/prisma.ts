@@ -1,3 +1,4 @@
+import { assertWorkLease } from '@/lib/workload/admission';
 import { PrismaClient } from '@prisma/client';
 import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
@@ -19,14 +20,17 @@ const pool = new Pool({
 const adapter = new PrismaPg(pool);
 
 const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined;
+  prisma: ReturnType<typeof createPrismaClient> | undefined;
 };
 
 const createPrismaClient = () =>
   new PrismaClient({
     adapter,
     log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
-  });
+  }).$extends({ query: { $allModels: { async $allOperations({ args, query }) {
+    await assertWorkLease();
+    return query(args);
+  } } } }) as unknown as PrismaClient;
 
 export const prisma =
   globalForPrisma.prisma && (globalForPrisma.prisma as PrismaClient & { signature?: unknown }).signature

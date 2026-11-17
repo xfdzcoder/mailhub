@@ -19,11 +19,9 @@ type WebhookChannel = {
   name: string;
   isActive: boolean;
   createdAt: string;
-} & (
-  | { type: 'TELEGRAM'; config: { chatId?: string } }
-  | { type: 'WECOM'; config: { webhookUrl?: string } }
-  | { type: 'GENERIC'; config: { url?: string } }
-);
+  type: 'TELEGRAM' | 'WECOM' | 'GENERIC';
+  hasConfig: boolean;
+};
 
 export default function ExperimentsSettingsPage() {
   const queryClient = useQueryClient();
@@ -138,8 +136,7 @@ export default function ExperimentsSettingsPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: webhook.type,
-          config: webhook.config,
+          id: webhook.id,
         }),
       });
       if (!res.ok) {
@@ -225,9 +222,7 @@ export default function ExperimentsSettingsPage() {
                     <div>
                       <h4 className="text-sm font-semibold text-gray-900">{wh.name}</h4>
                       <p className="text-xs text-gray-500">
-                {wh.type === 'TELEGRAM' && `Chat ID: ${wh.config.chatId || 'N/A'}`}
-                {wh.type === 'WECOM' && `URL: ${wh.config.webhookUrl?.slice(0, 35)}...`}
-                {wh.type === 'GENERIC' && `URL: ${wh.config.url?.slice(0, 35)}...`}
+                        Credentials configured
                       </p>
                     </div>
                   </div>

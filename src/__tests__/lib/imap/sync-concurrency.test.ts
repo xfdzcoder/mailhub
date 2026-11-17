@@ -1,3 +1,11 @@
+// These fixtures exercise mailbox behavior; admission has isolated Redis integration coverage.
+jest.mock('@/lib/workload/admission', () => ({ withoutWorkLease: (run: () => unknown) => run(), assertWorkLease: async () => {}, workSignal: () => undefined,
+  withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(),
+  AdmissionError: class extends Error {},
+}));
+jest.mock('@/lib/workload/ownership', () => ({
+  accountWorkOwner: async () => ({ userId: 'fixture-user', organizationId: 'fixture-org' }),
+}));
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
     emailAccount: {
@@ -91,7 +99,7 @@ describe('IMAP persistence concurrency', () => {
     const manager = new IMAPConnectionManager();
     const client = {
       fetch: jest.fn(async function* (_range: string, options: { source?: boolean }) {
-        if (options.source) {
+        if ('bodyStructure' in options) {
           yield { uid: 2, source: Buffer.from('raw message') };
           return;
         }
@@ -127,7 +135,6 @@ describe('IMAP persistence concurrency', () => {
     });
     expect(client.fetch.mock.calls[1][0]).toBe('2');
     expect(client.fetch.mock.calls[1][1]).toEqual({
-      source: true,
       uid: true,
       bodyStructure: true,
       internalDate: true,

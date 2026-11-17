@@ -495,3 +495,24 @@ model AttachmentStorageReservation {
   @@index([organizationId, state])
   @@map("attachment_storage_reservations")
 }
+
+model SendOperation {
+  id String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  accountId String @map("account_id") @db.Uuid
+  operationKey String @map("operation_key")
+  payloadHash String @map("payload_hash")
+  generation String @db.Uuid
+  state String
+  messageId String? @map("message_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  preparationExpiresAt DateTime @default(dbgenerated("(CURRENT_TIMESTAMP + interval '10 minutes')")) @map("preparation_expires_at") @db.Timestamptz
+  expiresAt DateTime @default(dbgenerated("(CURRENT_TIMESTAMP + interval '7 days')")) @map("expires_at") @db.Timestamptz
+  @@index([expiresAt])
+  @@index([state, preparationExpiresAt])
+  @@unique([organizationId, userId, accountId, operationKey])
+  @@index([organizationId, state])
+  @@map("send_operations")
+}

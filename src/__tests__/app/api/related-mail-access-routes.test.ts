@@ -1,3 +1,12 @@
+jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(), assertWorkLease: async () => {}, AdmissionError: class extends Error {} }));
+jest.mock('@/lib/email/attachment-accounting', () => ({
+  storageKey: (filename: string) => filename,
+  reserveAttachment: jest.fn(async () => ({ id: 'reservation' })),
+  publishAttachment: async (_reservation: unknown, publish: () => Promise<void>) => publish(),
+  commitAttachment: async () => {}, releaseAttachment: async () => {},
+  cleanupAttachment: async (_reservation: unknown, filename: string) => { await (await import('fs/promises')).unlink(filename); },
+  cleanupReplacedAttachment: async (filename: string) => { if (await (await import('@/lib/db/prisma')).prisma.attachment.count({ where: { storagePath: filename } }) === 0) await (await import('fs/promises')).unlink(filename); },
+}));
 // Endpoint fixtures isolate Redis; distributed policy is exercised separately.
 jest.mock('ioredis', () => class {
   on() { return this; }
@@ -50,7 +59,7 @@ jest.mock('nodemailer', () => ({ createTransport: jest.fn() }));
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'draft-message-id') }));
 jest.mock('@/lib/email/outgoing-files', () => ({
   readOutgoingFile: jest.fn(),
-  stageOutgoingFiles: jest.fn(async () => ({ files: [], cleanup: jest.fn() })),
+  stageOutgoingFiles: jest.fn(async () => ({ files: [], cleanup: jest.fn(), commit: jest.fn(), published: jest.fn() })),
 }));
 
 const mockMailComposer = jest.fn();

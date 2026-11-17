@@ -9,6 +9,11 @@
       "count": 18
     }
   },
+  "src/app/api/experiments/summary/trigger/route.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
   "src/app/api/notifications/subscribe/route.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1

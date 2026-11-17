@@ -1,9 +1,10 @@
 # Durable attachment accounting foundation
 
-This migration is inactive: no writer integration, enforcement, backfill, deletion,
-cleanup or send changes. Existing attachment rows and storage layout remain intact.
-PR #49 must remain draft until this prerequisite reaches dev; lease-loss fencing
-and send-retry findings are separate work and are not resolved here.
+The foundation migration itself is additive and leaves existing rows/files intact.
+PR #49 now adopts this contract for outgoing writers and reconciliation; see
+[adoption and isolated validation](workload/follow-up-validation.md). Keep #49 draft
+pending manual dev integration and review. The protocol below remains the durable
+accounting contract, including fail-closed readiness and retention of evidence.
 
 ## Inventory
 

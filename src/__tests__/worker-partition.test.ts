@@ -1,3 +1,4 @@
+jest.mock('@/lib/workload/send-once', () => ({ reconcileSendOperations: jest.fn().mockResolvedValue({ removed: 0, recovered: 0 }) }));
 jest.mock('dotenv', () => ({ config: jest.fn() }));
 
 jest.mock('@/lib/imap/connection-manager', () => ({
@@ -6,6 +7,7 @@ jest.mock('@/lib/imap/connection-manager', () => ({
 
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
+    $executeRaw: jest.fn().mockResolvedValue(0),
     systemPreference: { upsert: jest.fn().mockResolvedValue({ isAiEnabled: true, semanticSearchEnabled: false }) },
     emailAccount: { findMany: jest.fn() },
     $disconnect: jest.fn(),
@@ -25,6 +27,7 @@ jest.mock('@/lib/queue/workers/summary', () => ({ summaryWorker: { close: jest.f
 jest.mock('@/lib/gmail/sync-manager', () => ({ gmailSyncManager: { shutdown: jest.fn() } }));
 jest.mock('@/lib/queue/client', () => ({ enqueueInitialSync: jest.fn() }));
 
+import { reconcileSendOperations } from '@/lib/workload/send-once';
 import { prisma } from '@/lib/db/prisma';
 import { initMeilisearch } from '@/lib/search/meilisearch';
 import { enqueueInitialSync } from '@/lib/queue/client';
@@ -53,6 +56,9 @@ describe('worker bootstrap partition routing', () => {
     await import('@/worker');
     await jest.advanceTimersByTimeAsync(0);
 
+    expect(reconcileSendOperations).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(60000);
+    expect(reconcileSendOperations).toHaveBeenCalledTimes(2);
     expect(prisma.emailAccount.findMany).toHaveBeenCalledWith({
       where: { isActive: true, workerPartition: 'worker-1' },
     });

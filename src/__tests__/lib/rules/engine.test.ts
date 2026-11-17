@@ -1,3 +1,6 @@
+jest.mock('@/lib/workload/admission', () => ({ withoutWorkLease: (run: () => unknown) => run(), assertWorkLease: async () => {}, workSignal: () => undefined, withWork: async (_owner: unknown, run: () => Promise<unknown>) => run() }));
+jest.mock('@/lib/workload/ownership', () => ({ accountWorkOwner: async () => ({ userId: 'u', organizationId: 'o' }) }));
+jest.mock('@/lib/workload/send-once', () => ({ claimSend: async () => ({ beforeDelivery: async () => {}, delivered: async () => {}, failedBeforeDelivery: async () => {} }) }));
 import {
   evaluateCriterion,
   evaluateRule,
@@ -587,7 +590,7 @@ describe('Email Rules Engine', () => {
       const { processRulesForNewEmail } = await import('@/lib/rules/engine');
       await processRulesForNewEmail('email-1', 'acc-1', 'org-1', mockPrisma as unknown as PrismaClient);
 
-      expect(mockedSendEmail).toHaveBeenCalledWith(
+      expect(mockedSendEmail.mock.calls[0].slice(0, 2)).toEqual([
         'acc-1',
         expect.objectContaining({
           attachments: [
@@ -603,7 +606,7 @@ describe('Email Rules Engine', () => {
             },
           ],
         })
-      );
+      ]);
     });
 
     it('does not send a partial forward when an attachment cannot be retrieved', async () => {

@@ -1,3 +1,5 @@
+import { reconcileSendOperations } from '@/lib/workload/send-once';
+import { cleanupIncomingRejections } from '@/lib/email/incoming-rejections';
 import { config } from 'dotenv';
 config();
 
@@ -47,6 +49,22 @@ async function initializeImapConnections(accounts: EmailAccount[]): Promise<void
 async function bootstrap() {
   console.log(`Bootstrapping Worker [Partition: ${WORKER_PARTITION}]`);
 
+  // Run before external dependencies so idle/restarting workers also reclaim rows.
+  await reconcileSendOperations();
+  let sweepingSends = false;
+  const sendMaintenance = setInterval(async () => {
+    if (sweepingSends) return;
+    sweepingSends = true;
+    try { await reconcileSendOperations(); }
+    catch (error) { console.error('Send operation maintenance failed:', error); }
+    finally { sweepingSends = false; }
+  }, 60000);
+  sendMaintenance.unref();
+  await cleanupIncomingRejections();
+  const rejectionCleanup = setInterval(() => {
+    cleanupIncomingRejections().catch(error => console.error('Incoming rejection cleanup failed', error));
+  }, 24 * 60 * 60 * 1000);
+
   // 1. Initialize dependencies
   await initMeilisearch();
   const systemPreferences = await getSystemPreferences();
@@ -73,7 +91,11 @@ async function bootstrap() {
   // After initializing connections, enqueue initial sync for each account
   const { enqueueInitialSync } = await import('@/lib/queue/client');
   for (const account of accounts) {
-    await enqueueInitialSync(account);
+    try {
+      await enqueueInitialSync(account);
+    } catch (error) {
+      console.error(`Initial sync admission deferred for account ${account.id}:`, error);
+    }
   }
 
   // 3. Setup heartbeat mechanism
@@ -92,6 +114,8 @@ async function bootstrap() {
   const shutdown = async () => {
     console.log('SIGTERM received. Shutting down worker...');
     clearInterval(heartbeat);
+    clearInterval(sendMaintenance);
+    clearInterval(rejectionCleanup);
     await closeSyncWorkers();
     await searchWorker.close();
     await summaryWorker.close();
