@@ -7,6 +7,7 @@ jest.mock('@/lib/imap/connection-manager', () => ({
 
 jest.mock('@/lib/db/prisma', () => ({
   prisma: {
+    $executeRaw: jest.fn().mockResolvedValue(0),
     systemPreference: { upsert: jest.fn().mockResolvedValue({ isAiEnabled: true, semanticSearchEnabled: false }) },
     emailAccount: { findMany: jest.fn() },
     $disconnect: jest.fn(),

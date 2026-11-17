@@ -46,8 +46,8 @@ Respond in strictly valid JSON format with no markdown formatting or extra text.
         : localResult.reason,
       score: localResult.score,
     };
-  } catch (error) {
-    console.warn('AI spam check unavailable; using local classification:', error);
+  } catch {
+    console.warn('AI spam check unavailable; using local classification');
     return localDecision;
   }
 }

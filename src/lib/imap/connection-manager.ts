@@ -1,6 +1,8 @@
 import { assertWorkLease, withoutWorkLease } from '@/lib/workload/admission';
 import { withWork } from '@/lib/workload/admission';
 import { accountWorkOwner } from '@/lib/workload/ownership';
+import { validateRevision, evaluateIncoming, imapSource, syncRevision } from '@/lib/email/incoming-rejections';
+import { readImapIncoming, IMAP_RESPONSE_LIMITS, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import { ImapFlow, FetchMessageObject, type ImapFlowOptions, type MailboxLockObject, type MailboxObject } from 'imapflow';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db/prisma';
@@ -153,6 +155,7 @@ export async function withImapConnection<T>(
   try {
     const destination = await resolveSafeOutboundHost(account.imapHost);
     client = new ImapFlow({
+      ...IMAP_RESPONSE_LIMITS,
       host: destination.address,
       port: account.imapPort || 993,
       secure: account.imapSecure ?? true,
@@ -593,6 +596,7 @@ export class IMAPConnectionManager {
     }
 
     const client = new ImapFlow({
+      ...IMAP_RESPONSE_LIMITS,
       host: destination.address,
       port: account.imapPort || 993,
       secure: account.imapSecure ?? true,
@@ -853,7 +857,7 @@ export class IMAPConnectionManager {
     try {
       const account = await prisma.emailAccount.findUnique({
         where: { id: accountId },
-        select: { lastSyncedAt: true },
+        select: { lastSyncedAt: true, updatedAt: true },
       });
       if (!account) return;
 
@@ -882,11 +886,12 @@ export class IMAPConnectionManager {
           }
         } catch (error) {
           console.error(`Failed to reconcile IMAP ${folder} mailbox ${mailbox.path} for account ${accountId}:`, error);
+          throw error;
         }
       }
 
       await prisma.emailAccount.update({
-        where: { id: accountId },
+        where: { id: accountId, updatedAt: syncRevision(account.updatedAt) },
         data: { lastSyncedAt: cutoff },
       });
     } finally {
@@ -967,7 +972,7 @@ export class IMAPConnectionManager {
         accountId,
         missingUids.length > 0 ? missingUids.join(',') : range,
         {
-          source: true,
+
           uid: true,
           bodyStructure: true,
           internalDate: true,
@@ -975,6 +980,7 @@ export class IMAPConnectionManager {
         { uid: missingUids.length > 0 || fetchByUid }
       );
 
+      syncResult.failed += missingUids.filter(uid => !messages.some(message => message.uid === uid)).length;
       let nextMessageIndex = 0;
       const worker = async () => {
         while (nextMessageIndex < messages.length) {
@@ -1035,9 +1041,18 @@ export class IMAPConnectionManager {
     skipNotifications: boolean = false
   ): Promise<boolean> {
     try {
-      const rawSource = message.source;
-      if (!rawSource) return false;
-      const parsed = await parseEmail(rawSource);
+      const client = this.connections.get(accountId)!.client;
+      const mailbox = client.mailbox;
+      const source = mailbox && mailbox.uidValidity
+        ? imapSource(accountId, mailbox.path, BigInt(mailbox.uidValidity), BigInt(message.uid)) : null;
+      const outcome = await evaluateIncoming(source, async () => {
+        const download = await readImapIncoming(client, String(message.uid), undefined, INCOMING_LIMITS.raw);
+        if (!download?.content) throw new Error('Missing IMAP source');
+        return parseEmail(download.content);
+      });
+      if (outcome.kind === 'rejected') return true;
+      if (outcome.kind === 'retryable') throw outcome.error;
+      const parsed = outcome.value;
       const receivedAt = resolveImapReceivedAt(message.internalDate, parsed.receivedAt);
 
       // Resolve thread ID (cross-account)
@@ -1099,6 +1114,7 @@ export class IMAPConnectionManager {
 
       // Persist email envelope, body, and attachment metadata in a short transaction.
       const email = await retryAsync(() => prisma.$transaction(async (tx) => {
+        if (outcome.revision) await validateRevision(tx, accountId, outcome.revision);
         const email = await tx.email.upsert({
           where: {
             accountId_messageId: {

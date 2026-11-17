@@ -1,4 +1,5 @@
 import { reconcileSendOperations } from '@/lib/workload/send-once';
+import { cleanupIncomingRejections } from '@/lib/email/incoming-rejections';
 import { config } from 'dotenv';
 config();
 
@@ -59,6 +60,10 @@ async function bootstrap() {
     finally { sweepingSends = false; }
   }, 60000);
   sendMaintenance.unref();
+  await cleanupIncomingRejections();
+  const rejectionCleanup = setInterval(() => {
+    cleanupIncomingRejections().catch(error => console.error('Incoming rejection cleanup failed', error));
+  }, 24 * 60 * 60 * 1000);
 
   // 1. Initialize dependencies
   await initMeilisearch();
@@ -110,6 +115,7 @@ async function bootstrap() {
     console.log('SIGTERM received. Shutting down worker...');
     clearInterval(heartbeat);
     clearInterval(sendMaintenance);
+    clearInterval(rejectionCleanup);
     await closeSyncWorkers();
     await searchWorker.close();
     await summaryWorker.close();

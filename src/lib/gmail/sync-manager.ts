@@ -1,6 +1,7 @@
 import { assertWorkLease, withoutWorkLease } from '@/lib/workload/admission';
 import { withWork } from '@/lib/workload/admission';
 import { accountWorkOwner } from '@/lib/workload/ownership';
+import { validateRevision, evaluateIncoming, syncRevision } from '@/lib/email/incoming-rejections';
 import { prisma } from '@/lib/db/prisma';
 import { parseEmail } from '@/lib/imap/email-parser';
 import { resolveThreadId } from '@/lib/imap/threading';
@@ -173,6 +174,7 @@ export class GmailSyncManager {
       }
 
       const syncResult: SyncResult = { processed: 0, failed: 0 };
+      const cutoff = new Date();
 
       const accessToken = await getValidAccessToken(accountId);
 
@@ -214,9 +216,9 @@ export class GmailSyncManager {
       }
 
       await prisma.emailAccount.update({
-        where: { id: accountId },
+        where: { id: accountId, updatedAt: syncRevision(account.updatedAt) },
         data: {
-          lastSyncedAt: new Date(),
+          lastSyncedAt: cutoff,
           ...(account.initialSyncCompletedAt ? {} : { initialSyncCompletedAt: new Date() })
         }
       });
@@ -266,11 +268,17 @@ export class GmailSyncManager {
         return true;
       }
 
-      await assertWorkLease();
-      const fullMessage = await fetchMessageFull(accessToken, gmailMessageId);
-      await assertWorkLease();
-      const rawBuffer = await fetchMessageRaw(accessToken, gmailMessageId);
-      const parsed = await parseEmail(rawBuffer);
+      const outcome = await evaluateIncoming({ accountId, provider: 'gmail', providerMessageId: gmailMessageId }, async () => {
+        const fullMessage = await fetchMessageFull(accessToken, gmailMessageId);
+        const rawBuffer = await fetchMessageRaw(accessToken, gmailMessageId);
+        await assertWorkLease();
+        const parsed = await parseEmail(rawBuffer);
+        const references = extractGmailAttachmentReferences(fullMessage.payload);
+        return { parsed, references };
+      });
+      if (outcome.kind === 'rejected') return true;
+      if (outcome.kind === 'retryable') throw outcome.error;
+      const { parsed, references } = outcome.value;
 
       // We can use the hex string of the Gmail ID as uid, but it's easier to just convert the first 15 chars to BigInt
       // Gmail IDs are typically 16 chars hex, e.g., 18e6e87b9a9f
@@ -333,11 +341,12 @@ export class GmailSyncManager {
       const reconciledAttachments = buildReceivedAttachmentMetadata(
         parsed.attachments,
         existingAttachments,
-        extractGmailAttachmentReferences(fullMessage.payload),
+        references,
         { preserveStoragePath: folder === 'SENT' || folder === 'DRAFTS' }
       );
 
       const email = await retryAsync(() => prisma.$transaction(async (tx) => {
+        if (outcome.revision) await validateRevision(tx, accountId, outcome.revision);
         const email = await tx.email.upsert({
           where: {
             accountId_messageId: {
