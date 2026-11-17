@@ -94,9 +94,12 @@ async function main() {
     request.headers.set('authorization', 'Bearer ' + freshSession.token);
     return request;
   };
+  const active = process.env.INTEGRATION_CREDENTIAL_ACTIVE_KEY;
+  delete process.env.INTEGRATION_CREDENTIAL_ACTIVE_KEY;
   assert.equal((await GET(freshReq('GET'))).status, 200);
+  process.env.INTEGRATION_CREDENTIAL_ACTIVE_KEY = active;
   let fresh = await prisma.experimentSetting.findUniqueOrThrow({ where: { organizationId: freshOrg.id } });
-  assert.ok(fresh.credentialsEncrypted);
+  assert.equal(fresh.credentialsEncrypted, null);
   assert.deepEqual(readAiCredentials(fresh), { aiApiKey: null, aiBaseUrl: null });
   // Exercise PUT creation separately from GET's lazy default creation.
   await prisma.experimentSetting.delete({ where: { id: fresh.id } });

@@ -1,3 +1,5 @@
+BEGIN;
+
 -- Reject uncoordinated legacy writes rather than silently serving stale ciphertext.
 CREATE FUNCTION guard_integration_credentials() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -19,3 +21,5 @@ CREATE TRIGGER guard_experiment_credentials BEFORE UPDATE ON experiment_settings
 FOR EACH ROW EXECUTE FUNCTION guard_integration_credentials();
 CREATE TRIGGER guard_webhook_credentials BEFORE UPDATE ON notification_webhooks
 FOR EACH ROW EXECUTE FUNCTION guard_integration_credentials();
+
+COMMIT;

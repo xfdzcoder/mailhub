@@ -203,8 +203,8 @@ Generate a fresh 32-byte key with
 `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`.
 Store it through the deployment secret manager, for example a JSON registry with
 one entry `{"v1":"<generated base64 key>"}` and active ID `v1`. Do not use that
-placeholder literally. These settings are required for new settings writes,
-including default settings creation; there is no development fallback key.
+placeholder literally. These settings are required when saving protected configuration. The default row
+created on the first settings read contains no credentials and needs no key.
 Never commit key material or include it in logs/checkpoints. Keep all referenced
 key IDs available to readers and backups; changing the active ID affects only
 subsequent writes and is not a rotation/backfill procedure.

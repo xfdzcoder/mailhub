@@ -16,22 +16,11 @@ export async function GET(req: NextRequest) {
   const adminCheck = requireAdmin(auth);
   if (adminCheck) return adminCheck;
 
-  let settings = await prisma.experimentSetting.findUnique({
-    where: { organizationId: auth.organizationId },
-  });
-
+  const where = { organizationId: auth.organizationId };
+  let settings = await prisma.experimentSetting.findUnique({ where });
   if (!settings) {
-    const id = randomUUID();
-    settings = await prisma.experimentSetting.create({
-      data: {
-        id,
-        ...protectCredentials('experiment_settings', { id, organizationId: auth.organizationId }, { aiApiKey: null, aiBaseUrl: null }),
-        organizationId: auth.organizationId,
-        isAiEnabled: true,
-        aiProvider: 'openai',
-        aiModelName: 'gpt-4o-mini',
-      },
-    });
+    await prisma.experimentSetting.createMany({ data: where, skipDuplicates: true });
+    settings = await prisma.experimentSetting.findUniqueOrThrow({ where });
   }
 
   const systemPreferences = await getSystemPreferences();
