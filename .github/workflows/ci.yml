@@ -29,6 +29,7 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+      - run: node --test scripts/ci/tests/scan-images.test.mjs
       - run: npx --no-install prisma generate
       - run: node --test scripts/ci/security.test.mjs
       - run: npm run lint
