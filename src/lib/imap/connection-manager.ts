@@ -1,3 +1,6 @@
+import { assertWorkLease, withoutWorkLease } from '@/lib/workload/admission';
+import { withWork } from '@/lib/workload/admission';
+import { accountWorkOwner } from '@/lib/workload/ownership';
 import { validateRevision, evaluateIncoming, imapSource, syncRevision } from '@/lib/email/incoming-rejections';
 import { readImapIncoming, IMAP_RESPONSE_LIMITS, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import { ImapFlow, FetchMessageObject, type ImapFlowOptions, type MailboxLockObject, type MailboxObject } from 'imapflow';
@@ -160,6 +163,7 @@ export async function withImapConnection<T>(
       auth,
       logger: false,
     });
+    await assertWorkLease();
     await client.connect();
   } catch (error) {
     console.error(`Failed to open IMAP connection for account ${accountId}:`, error);
@@ -168,6 +172,7 @@ export async function withImapConnection<T>(
   }
 
   try {
+    await assertWorkLease();
     return await operation(client);
   } catch (error) {
     console.error(`IMAP operation failed for account ${accountId}:`, error);
@@ -325,6 +330,7 @@ export async function moveMessageOn(
 
   const lock = await client.getMailboxLock(sourcePath);
   try {
+    await assertWorkLease();
       const result = await client.messageMove(String(sourceUid), targetPath, { uid: true });
     let newUid: bigint | null = null;
     try {
@@ -377,6 +383,7 @@ export async function deleteMessagesOn(
       }
 
       if (confirmed.length > 0) {
+        await assertWorkLease();
         await client.messageDelete(confirmed.join(','), { uid: true });
       }
     } finally {
@@ -404,6 +411,7 @@ export async function deleteMessagesOn(
     const lock = await client.getMailboxLock(located.path);
     try {
       console.log(`Stale UID for ${original.messageId}: deleting from ${located.path} (uid ${located.uid}).`);
+      await assertWorkLease();
       await client.messageDelete(String(located.uid), { uid: true });
       deleted++;
     } catch (error) {
@@ -643,6 +651,7 @@ export class IMAPConnectionManager {
     });
 
     try {
+      await assertWorkLease();
       await client.connect();
       entry.isConnected = true;
       entry.reconnectAttempts = 0;
@@ -710,7 +719,7 @@ export class IMAPConnectionManager {
         // message once per listener.
         if (!entry.existsHandlerAttached) {
           entry.existsHandlerAttached = true;
-          client.on('exists', async (data: { path: string; count: number; prevCount: number }) => {
+          client.on('exists', (data: { path: string; count: number; prevCount: number }) => withoutWorkLease(async () => {
             if (data.path === 'INBOX' && data.count > data.prevCount) {
               console.log(
                 `New email(s) in INBOX for account ${accountId}: ${data.count - data.prevCount} new`
@@ -721,7 +730,7 @@ export class IMAPConnectionManager {
                 console.error(`Failed to sync new IMAP emails for account ${accountId}:`, error);
               }
             }
-          });
+          }));
         }
 
         // Holding a mailbox lock alone does not issue the IMAP IDLE command.
@@ -756,7 +765,7 @@ export class IMAPConnectionManager {
     folder: string = 'INBOX',
     skipNotifications: boolean = false
   ): Promise<SyncResult> {
-    return this.queueAccountMailboxOperation(accountId, () =>
+    return withWork(await accountWorkOwner(accountId), () => this.queueAccountMailboxOperation(accountId, () =>
       this.fetchNewEmailsForAccount(
         accountId,
         startSeqOrUid,
@@ -764,7 +773,7 @@ export class IMAPConnectionManager {
         folder,
         skipNotifications
       )
-    );
+    ));
   }
 
   /** Mark the current connection unavailable and schedule one reconnect attempt. */
@@ -783,11 +792,11 @@ export class IMAPConnectionManager {
     if (entry.reconciliationTimer) return;
 
     const intervalMs = runtimeConfig.imapReconcileIntervalMs || 5 * 60 * 1000;
-    entry.reconciliationTimer = setInterval(() => {
+    entry.reconciliationTimer = withoutWorkLease(() => setInterval(() => {
       void this.reconcileRecentMailboxes(accountId).catch((error) => {
         console.error(`Failed to reconcile IMAP mailboxes for account ${accountId}:`, error);
       });
-    }, intervalMs);
+    }, intervalMs));
   }
 
   /** Enable reconciliation after the worker has completed the initial sync. */
@@ -809,9 +818,9 @@ export class IMAPConnectionManager {
 
     entry.reconciliationInFlight = true;
     try {
-      await this.queueAccountMailboxOperation(accountId, () =>
+      await withWork(await accountWorkOwner(accountId), () => this.queueAccountMailboxOperation(accountId, () =>
         this.reconcileMailboxesForAccount(accountId, entry)
-      );
+      ));
     } finally {
       if (this.connections.get(accountId) === entry) {
         entry.reconciliationInFlight = false;
@@ -869,6 +878,7 @@ export class IMAPConnectionManager {
               entry.client.search({ since }, { uid: true })
             );
             if (Array.isArray(uids) && uids.length > 0) {
+              await assertWorkLease();
               await this.fetchNewEmailsForAccount(accountId, uids, undefined, folder, true);
             }
           } finally {
@@ -1010,8 +1020,10 @@ export class IMAPConnectionManager {
     options: Parameters<ImapFlow['fetch']>[2]
   ): Promise<FetchMessageObject[]> {
     return retryImapRequest(accountId, async () => {
+      await assertWorkLease();
       const messages: FetchMessageObject[] = [];
       for await (const message of this.connections.get(accountId)!.client.fetch(range, query, options)) {
+        await assertWorkLease();
         messages.push(message);
       }
       return messages;
@@ -1214,6 +1226,7 @@ export class IMAPConnectionManager {
           },
         });
 
+        await assertWorkLease();
         return email;
       }, { maxWait: 10_000, timeout: 30_000 }));
       const persistedAt = new Date();
@@ -1303,6 +1316,7 @@ export class IMAPConnectionManager {
     this.releaseIdle(entry);
 
     try {
+      await assertWorkLease();
       return await operation(entry.client);
     } catch (error) {
       console.error(`Mailbox operation failed for account ${accountId}:`, error);
@@ -1504,7 +1518,7 @@ export class IMAPConnectionManager {
 
     console.log(`Scheduling reconnect for account ${accountId} in ${delay}ms`);
 
-    entry.reconnectTimer = setTimeout(async () => {
+    entry.reconnectTimer = withoutWorkLease(() => setTimeout(async () => {
       entry.reconnectTimer = undefined;
       if (this.connections.get(accountId) !== entry) return;
 
@@ -1529,7 +1543,7 @@ export class IMAPConnectionManager {
         entry.reconnectAttempts = currentAttempts;
         this.scheduleReconnect(accountId, entry);
       }
-    }, delay);
+    }, delay));
   }
 
   /**

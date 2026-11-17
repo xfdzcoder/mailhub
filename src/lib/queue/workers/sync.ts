@@ -1,3 +1,4 @@
+import { processAdmitted } from '@/lib/workload/processor';
 import { clearIncomingRejections, syncRevision } from '@/lib/email/incoming-rejections';
 import { Worker, Job } from 'bullmq';
 import type { QueueOptions } from 'bullmq';
@@ -153,10 +154,10 @@ async function processSyncJob(
 const createSyncWorker = (queueName: string, workerPartition: string, isLegacyQueue = false) =>
   new Worker<SyncJobPayload>(
     queueName,
-    (job) => processSyncJob(job, isLegacyQueue, workerPartition),
+    (job) => processAdmitted(job, () => processSyncJob(job, isLegacyQueue, workerPartition)),
     {
-    connection: workerRedis as unknown as QueueOptions['connection'],
-      concurrency: runtimeConfig.syncWorkerConcurrency,
+      connection: workerRedis as unknown as QueueOptions['connection'],
+      concurrency: Math.max(2, runtimeConfig.syncWorkerConcurrency),
     }
   );
 

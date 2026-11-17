@@ -1,4 +1,7 @@
-import { mkdir, writeFile, unlink, open } from 'fs/promises';
+import { assertWorkLease } from '@/lib/workload/admission';
+import { reserveAttachment, releaseAttachment, cleanupAttachment, publishAttachment, commitAttachment, storageKey, type StorageOwner, type AttachmentReservation } from './attachment-accounting';
+import type { Prisma } from '@prisma/client';
+import { mkdir, writeFile, unlink, open, link, lstat, realpath } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { outgoingLimits, OutgoingInputError, validateOutgoingMail } from './outgoing-budget';
@@ -6,27 +9,54 @@ import { outgoingLimits, OutgoingInputError, validateOutgoingMail } from './outg
 /** Stage new, server-named files; callers publish metadata transactionally. */
 export async function stageOutgoingFiles(
   attachments: { filename: string; contentType: string; content: string }[],
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  owner: StorageOwner,
 ) {
   const checkAborted = () => {
     if (signal?.aborted) throw new OutgoingInputError('Request aborted', 400);
   };
   checkAborted();
   validateOutgoingMail({ attachments });
+  const reservations = new Map<string, AttachmentReservation>();
+  let committed = false;
   const files: { id: string; filename: string; contentType: string; sizeBytes: number; storagePath: string }[] = [];
   const cleanup = async () => {
-    await Promise.all(files.map(file => unlink(file.storagePath).catch(() => undefined)));
+    if (committed) return;
+    for (const file of files) {
+      const reservation = reservations.get(file.id);
+      if (reservation) await cleanupAttachment(reservation, file.storagePath);
+      else await unlink(file.storagePath).catch(() => undefined);
+    }
+    for (const reservation of reservations.values()) await releaseAttachment(reservation);
   };
   try {
-    if (attachments.length) await mkdir(path.join(process.cwd(), '.storage', 'attachments'), { recursive: true });
+    if (attachments.length) {
+      const storage = path.join(process.cwd(), '.storage');
+      const parent = await lstat(storage).catch(error => { if (error.code !== 'ENOENT') throw error; return null; });
+      if (parent?.isSymbolicLink()) throw new Error('Symlinked attachment storage');
+      const root = path.join(storage, 'attachments');
+      await mkdir(root, { recursive: true });
+      if (await realpath(root) !== root) throw new Error('Symlinked attachment storage');
+    }
     for (const att of attachments) {
       checkAborted();
+      await assertWorkLease();
       const id = randomUUID();
       const storagePath = path.join(process.cwd(), '.storage', 'attachments', id);
       const buffer = Buffer.from(att.content, 'base64');
+      reservations.set(id, await reserveAttachment(owner, storageKey(storagePath), `outgoing:${id}`, buffer.length));
       files.push({ id, storagePath, filename: att.filename, contentType: att.contentType, sizeBytes: buffer.length });
       try {
-        await writeFile(storagePath, buffer, { flag: 'wx' });
+        const temporary = `${storagePath}.tmp-${randomUUID()}`;
+        try {
+          await writeFile(temporary, buffer, { flag: 'wx' });
+          await assertWorkLease();
+          // link publishes exclusively without overwriting another object.
+          const publish = async () => { await link(temporary, storagePath); await unlink(temporary); };
+          const reservation = reservations.get(id);
+          if (!reservation) throw new Error('Missing attachment reservation');
+          await publishAttachment(reservation, publish);
+        } finally { await unlink(temporary).catch(() => undefined); }
       } catch (error) {
         // A colliding pre-existing path belongs to somebody else.
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') files.pop();
@@ -34,7 +64,16 @@ export async function stageOutgoingFiles(
       }
     }
     checkAborted();
-    return { files, cleanup };
+    return { files, cleanup,
+      async commit(tx: Prisma.TransactionClient) {
+        for (const file of files) {
+          const reservation = reservations.get(file.id);
+          if (reservation) await commitAttachment(tx, reservation, file.id);
+        }
+        await assertWorkLease();
+      },
+      published() { committed = true; },
+    };
   } catch (error) {
     await cleanup();
     throw error;

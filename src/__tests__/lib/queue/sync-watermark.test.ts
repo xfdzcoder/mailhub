@@ -1,3 +1,4 @@
+jest.mock('@/lib/workload/processor', () => ({ processAdmitted: async (_job: unknown, run: () => Promise<unknown>) => run() }));
 jest.mock('@/lib/email/incoming-rejections', () => ({
   ...jest.requireActual('@/lib/email/incoming-rejections'),
   clearIncomingRejections: jest.fn(),

@@ -1,3 +1,4 @@
+import { assertWorkLease, workSignal } from '@/lib/workload/admission';
 import { incomingJson, IncomingBudgetError, IncomingPolicyError, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import { validateRawOutgoing } from '@/lib/email/outgoing-budget';
 import { decrypt, encrypt } from '@/lib/crypto';
@@ -25,8 +26,12 @@ export async function gmailFetch(url: string | URL, options?: RequestInit, maxRe
     const maxBackoff = 32000;
 
     while (true) {
-      const timeout = AbortSignal.timeout(INCOMING_LIMITS.timeoutMs);
-      const res = await fetch(url.toString(), { ...options, signal: options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout });
+      await assertWorkLease();
+      const signals = [AbortSignal.timeout(INCOMING_LIMITS.timeoutMs)];
+      const leaseSignal = workSignal();
+      if (options?.signal) signals.push(options.signal);
+      if (leaseSignal) signals.push(leaseSignal);
+      const res = await fetch(url.toString(), { ...options, signal: AbortSignal.any(signals) });
       const quotaError = await isQuotaErrorResponse(res);
 
       // Gmail can report user/project rate limits as 403 as well as 429.
@@ -364,7 +369,7 @@ export async function sendMessageRaw(
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({ raw: base64Str }),
-  });
+  }, 0);
 
   if (!res.ok) {
     const err = await gmailJson(res).catch(() => null);

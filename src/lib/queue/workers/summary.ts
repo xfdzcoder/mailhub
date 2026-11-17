@@ -1,3 +1,5 @@
+import { assertWorkLease } from '@/lib/workload/admission';
+import { processAdmitted } from '@/lib/workload/processor';
 import { readWebhookCredentials } from '@/lib/integrations/credentials';
 import { Worker, Job } from 'bullmq';
 import type { QueueOptions } from 'bullmq';
@@ -35,7 +37,12 @@ export interface SummaryJobPayload {
 }
 
 export async function executeSummaryRun(payload: SummaryJobPayload): Promise<void> {
-  const { summaryRunId, organizationId, labelId, webhookIds, timeRangeHours, limit = 25 } = payload;
+  const run = await prisma.emailSummaryRun.findUnique({ where: { id: payload.summaryRunId } });
+  if (!run) return;
+  const { id: summaryRunId, organizationId, labelId } = run;
+  const webhookIds = payload.webhookIds?.slice(0, 20);
+  const limit = Math.min(100, Math.max(1, Number(payload.limit) || 25));
+  const timeRangeHours = Math.min(720, Math.max(1, Number(payload.timeRangeHours) || 24));
 
   // Atomically claim the job by transitioning status from QUEUED -> SUMMARIZING
   const claimResult = await prisma.emailSummaryRun.updateMany({
@@ -290,6 +297,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
     let fallbackReason: AiUnavailableError['reason'] | null = aiEnabled ? null : 'disabled';
     if (aiEnabled) {
       try {
+        await assertWorkLease();
         summaryText = await generateEmailBatchSummary({
           organizationId,
           provider,
@@ -361,6 +369,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
         );
 
         for (const webhook of webhooks) {
+          await assertWorkLease();
           const dispatchRes = await dispatchWebhookNotification({
             type: webhook.type as import('@/lib/notifications/types').WebhookType,
             config: readWebhookCredentials(webhook),
@@ -418,7 +427,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
 export const summaryWorker = new Worker<SummaryJobPayload>(
   'email-summary',
   async (job: Job<SummaryJobPayload>) => {
-    await executeSummaryRun(job.data);
+    await processAdmitted(job, () => executeSummaryRun(job.data));
   },
   {
     connection: workerRedis as unknown as QueueOptions['connection'],

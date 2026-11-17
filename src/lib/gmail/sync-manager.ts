@@ -1,3 +1,6 @@
+import { assertWorkLease, withoutWorkLease } from '@/lib/workload/admission';
+import { withWork } from '@/lib/workload/admission';
+import { accountWorkOwner } from '@/lib/workload/ownership';
 import { validateRevision, evaluateIncoming, syncRevision } from '@/lib/email/incoming-rejections';
 import { prisma } from '@/lib/db/prisma';
 import { parseEmail } from '@/lib/imap/email-parser';
@@ -75,11 +78,11 @@ export class GmailSyncManager {
 
     console.log(`Initializing Gmail polling for account ${account.id}`);
 
-    const interval = setInterval(() => {
+    const interval = withoutWorkLease(() => setInterval(() => {
       this.pollNewEmails(account.id, account.organizationId).catch((err) => {
         console.error(`Gmail polling error for account ${account.id}:`, err);
       });
-    }, runtimeConfig.gmailPollIntervalMs);
+    }, runtimeConfig.gmailPollIntervalMs));
 
     this.pollingIntervals.set(account.id, interval);
   }
@@ -110,6 +113,7 @@ export class GmailSyncManager {
       for (const { labelId, folder } of folders) {
         let pageToken: string | undefined = undefined;
         do {
+          await assertWorkLease();
           const result = await fetchMessagesList(accessToken, {
             labelIds: [labelId],
             maxResults: 50,
@@ -151,6 +155,10 @@ export class GmailSyncManager {
    * Polls for new emails since the last sync.
    */
   private async pollNewEmails(accountId: string, organizationId: string): Promise<SyncResult> {
+    return withWork(await accountWorkOwner(accountId), () => this.pollAdmitted(accountId, organizationId));
+  }
+
+  private async pollAdmitted(accountId: string, organizationId: string): Promise<SyncResult> {
     if (this.pollingAccountIds.has(accountId)) {
       console.log(`Gmail poll already in progress for account ${accountId}`);
       return { processed: 0, failed: 0 };
@@ -183,6 +191,7 @@ export class GmailSyncManager {
       ]) {
         let pageToken: string | undefined;
         do {
+          await assertWorkLease();
           const result = await fetchMessagesList(accessToken, {
             labelIds: [labelId],
             maxResults: 50,
@@ -262,6 +271,7 @@ export class GmailSyncManager {
       const outcome = await evaluateIncoming({ accountId, provider: 'gmail', providerMessageId: gmailMessageId }, async () => {
         const fullMessage = await fetchMessageFull(accessToken, gmailMessageId);
         const rawBuffer = await fetchMessageRaw(accessToken, gmailMessageId);
+        await assertWorkLease();
         const parsed = await parseEmail(rawBuffer);
         const references = extractGmailAttachmentReferences(fullMessage.payload);
         return { parsed, references };
@@ -448,6 +458,7 @@ export class GmailSyncManager {
           },
         });
 
+        await assertWorkLease();
         return email;
       }, { maxWait: 10_000, timeout: 30_000 }));
 
