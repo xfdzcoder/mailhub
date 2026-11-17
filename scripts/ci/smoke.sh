@@ -17,6 +17,9 @@ for target in runtime migrate; do
   if [[ $target == migrate ]]; then image=${MIGRATION_IMAGE:-mailhub-smoke:migrate}; fi
   docker run --rm -e INVENTORY_TARGET="$target" --entrypoint node "$image" -e '
     const fs = require("node:fs");
+    console.log(process.env.INVENTORY_TARGET, "Node", process.versions.node);
+    if (Number(process.versions.node.split(".")[0]) !== 24) process.exitCode = 1;
+    if (["/usr/local/bin/npm", "/usr/local/bin/npx", "/usr/local/lib/node_modules/npm"].some(path => fs.existsSync(path))) process.exitCode = 1;
     const generatedVersion = require("@prisma/client").Prisma.prismaVersion.client;
     console.log(process.env.INVENTORY_TARGET, "generated client", generatedVersion);
     if (generatedVersion !== "7.10.1") process.exitCode = 1;
