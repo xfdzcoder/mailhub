@@ -41,7 +41,7 @@ async function main() {
     assert.equal((await evaluateIncoming(gmail, async () => 'expired retry')).kind, 'accepted');
     await cleanupIncomingRejections();
     assert.equal(await prisma.incomingMailRejection.count({ where: { accountId } }), 0);
-    // Reset waits for an in-flight deterministic read before clearing its result.
+    // Reset completes while the provider read is still in progress.
     let entered!: () => void;
     let finish!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
@@ -49,10 +49,9 @@ async function main() {
     const work = evaluateIncoming(gmail, async () => { entered(); await pending; return reject(); });
     await started;
     const oldAccount = await prisma.emailAccount.findUniqueOrThrow({ where: { id: accountId } });
-    const reset = clearIncomingRejections(accountId);
+    await clearIncomingRejections(accountId);
     finish();
-    await work;
-    await reset;
+    assert.equal((await work).kind, 'retryable');
     await assert.rejects(prisma.emailAccount.update({
       where: { id: accountId, updatedAt: syncRevision(oldAccount.updatedAt) },
       data: { lastSyncedAt: new Date() },

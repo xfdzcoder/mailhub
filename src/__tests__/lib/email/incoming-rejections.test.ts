@@ -26,7 +26,7 @@ it('accounts for a deterministic rejection and suppresses a later read', async (
   expect(read).not.toHaveBeenCalled();
 });
 it('does not account for a failed rejection write', async () => {
-  (prisma.$executeRaw as jest.Mock).mockResolvedValueOnce(0).mockRejectedValueOnce(new Error('disk')); 
+  (prisma.$executeRaw as jest.Mock).mockResolvedValueOnce(0).mockRejectedValueOnce(new Error('disk'));
   await expect(evaluateIncoming(source, async () => { throw new IncomingPolicyError('message_size_limit'); })).resolves.toEqual({ kind: 'retryable', error: new Error('disk') });
   await expect(evaluateIncoming(source, async () => 'ordinary')).resolves.toMatchObject({ kind: 'accepted', value: 'ordinary' });
 });
