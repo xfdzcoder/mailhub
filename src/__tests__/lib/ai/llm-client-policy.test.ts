@@ -57,3 +57,26 @@ it('does not inherit shared credentials from stored tenant configuration', async
   await callLlmApi(args);
   expect(headers().Authorization).toBeUndefined();
 });
+
+it('uses protected tenant credentials with both OpenAI-compatible and Claude providers', async () => {
+  const { protectCredentials } = await import('@/lib/integrations/credentials');
+  process.env.INTEGRATION_CREDENTIAL_KEYS = JSON.stringify({ test: Buffer.alloc(32, 1).toString('base64') });
+  process.env.INTEGRATION_CREDENTIAL_ACTIVE_KEY = 'test';
+  const identity = { id: 'row', organizationId: 'org' };
+  for (const provider of ['openai', 'claude']) {
+    (prisma.experimentSetting.findUnique as jest.Mock).mockResolvedValue({ ...identity, aiProvider: provider, aiApiKey: 'stale-legacy', aiBaseUrl: null,
+      ...protectCredentials('experiment_settings', identity, { aiApiKey: 'protected-key', aiBaseUrl: 'https://tenant.example/v1' }) });
+    await expect(callLlmApi(args)).resolves.toBe('ok');
+    const call = (modelPostJson as jest.Mock).mock.calls.at(-1);
+    expect(call[0]).toBe('https://tenant.example/v1/' + (provider === 'claude' ? 'messages' : 'chat/completions'));
+    expect(call[1][provider === 'claude' ? 'x-api-key' : 'Authorization']).toBe(provider === 'claude' ? 'protected-key' : 'Bearer protected-key');
+  }
+});
+it('rejects protected corruption before any model request and suppresses remote diagnostics', async () => {
+  (prisma.experimentSetting.findUnique as jest.Mock).mockResolvedValue({ id: 'row', organizationId: 'org', aiApiKey: 'legacy-key', credentialsEncrypted: 'corrupt', credentialsFormatVersion: 1, credentialsKeyVersion: 'unknown' });
+  await expect(callLlmApi(args)).rejects.toThrow('Integration credentials are unavailable');
+  expect(modelPostJson).not.toHaveBeenCalled();
+  (prisma.experimentSetting.findUnique as jest.Mock).mockResolvedValue(null);
+  (modelPostJson as jest.Mock).mockRejectedValue(new Error('secret '.repeat(10000)));
+  await expect(callLlmApi(args)).rejects.toThrow('AI provider is unavailable');
+});

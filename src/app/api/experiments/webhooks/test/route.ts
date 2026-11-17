@@ -1,3 +1,5 @@
+import { prisma } from '@/lib/db/prisma';
+import { readWebhookCredentials } from '@/lib/integrations/credentials';
 import { protectSensitive } from '@/lib/auth/attempts';
 import { NextRequest } from 'next/server';
 import {
@@ -16,9 +18,16 @@ async function handlePOST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { type, config } = body;
+    let { type, config } = body;
+    if (body.id !== undefined) {
+      if (typeof body.id !== 'string') return apiError('Invalid webhook ID', 400);
+      const webhook = await prisma.notificationWebhook.findFirst({ where: { id: body.id, organizationId: auth.organizationId } });
+      if (!webhook) return apiError('Webhook channel not found', 404);
+      type = webhook.type;
+      config = readWebhookCredentials(webhook);
+    }
 
-    if (!type || !config) {
+    if (!['TELEGRAM', 'WECOM', 'GENERIC'].includes(type) || !config || typeof config !== 'object' || Array.isArray(config)) {
       return apiError('Type and config are required for test dispatch', 400);
     }
 
@@ -37,8 +46,8 @@ async function handlePOST(req: NextRequest) {
     }
 
     return apiResponse({ message: 'Test message sent successfully!', result });
-  } catch (err: unknown) {
-    return apiError(err instanceof Error ? err.message : 'Failed to send test webhook notification', 500);
+  } catch {
+    return apiError('Failed to send test webhook notification', 500);
   }
 }
 

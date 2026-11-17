@@ -1,3 +1,4 @@
+import { readWebhookCredentials } from '@/lib/integrations/credentials';
 import { Worker, Job } from 'bullmq';
 import type { QueueOptions } from 'bullmq';
 import Redis from 'ioredis';
@@ -163,8 +164,8 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
       });
 
       emailIdsFromMeilisearch = (searchRes.hits || []).map((hit) => hit.id);
-    } catch (searchError) {
-      console.warn('Meilisearch email query failed, falling back to PostgreSQL query:', searchError);
+    } catch {
+      console.warn('Meilisearch email query failed, falling back to PostgreSQL query');
     }
 
     let rawEmails: Array<{
@@ -292,8 +293,6 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
         summaryText = await generateEmailBatchSummary({
           organizationId,
           provider,
-          apiKey: settings?.aiApiKey,
-          baseUrl: settings?.aiBaseUrl,
           modelName,
           customPrompt: settings?.aiCustomPrompt,
           labelName,
@@ -364,7 +363,7 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
         for (const webhook of webhooks) {
           const dispatchRes = await dispatchWebhookNotification({
             type: webhook.type as import('@/lib/notifications/types').WebhookType,
-            config: webhook.config,
+            config: readWebhookCredentials(webhook),
             labelName,
             summaryText,
             emailCount: emailsToSummarize.length,
@@ -395,20 +394,24 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
     await completeAgentRun(summaryRunId, summaryText, emailsToSummarize.length, webhookLogs);
 
     console.log(`Successfully completed email summary run ${summaryRunId}`);
-  } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
+  } catch {
+    const errorMsg = 'Summary job failed';
     console.error(`Email summary job ${summaryRunId} failed:`, errorMsg);
 
-    await prisma.emailSummaryRun.update({
-      where: { id: summaryRunId },
-      data: {
-        status: 'FAILED',
-        errorMessage: errorMsg,
-      },
-    });
+    try {
+      await prisma.emailSummaryRun.update({
+        where: { id: summaryRunId },
+        data: {
+          status: 'FAILED',
+          errorMessage: errorMsg,
+        },
+      });
 
-    await failAgentRun(summaryRunId, errorMsg);
-    throw err;
+      await failAgentRun(summaryRunId, errorMsg);
+    } catch {
+      // Failure reporting must not expose a raw database error either.
+    }
+    throw new Error(errorMsg);
   }
 }
 
@@ -423,6 +426,6 @@ export const summaryWorker = new Worker<SummaryJobPayload>(
   }
 );
 
-summaryWorker.on('failed', (job, err) => {
-  console.error(`Summary worker job ${job?.id} failed:`, err.message);
+summaryWorker.on('failed', (job) => {
+  console.error(`Summary worker job ${job?.id} failed:`, 'Summary job failed');
 });
