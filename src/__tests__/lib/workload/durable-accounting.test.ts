@@ -277,9 +277,10 @@ integration('durable accounting and send replay on disposable PostgreSQL and SMT
       await expect(sendEmail(owner.accountId, input, failed.beforeDelivery)).rejects.toThrow('credential');
       await failed.failedBeforeDelivery();
       (getDecryptedAccount as jest.Mock).mockResolvedValue(account);
+      const correctedInput = { ...input, subject: 'Corrected after failure' };
       for (const key of ['retryable', 'independent']) {
-        const operation = await claimSend(principal, owner.accountId, key, input);
-        const result = await sendEmail(owner.accountId, input, operation.beforeDelivery);
+        const operation = await claimSend(principal, owner.accountId, key, correctedInput);
+        const result = await sendEmail(owner.accountId, correctedInput, operation.beforeDelivery);
         await operation.delivered(result.messageId);
       }
       rejectAuth = true;
@@ -296,7 +297,7 @@ integration('durable accounting and send replay on disposable PostgreSQL and SMT
       await partial.delivered(partialResult.messageId);
       await expect(claimSend(principal, owner.accountId, 'partial', partialInput)).rejects.toThrow('already attempted');
       expect(deliveries).toBe(4);
-      await expect(claimSend(principal, owner.accountId, 'retryable', input)).rejects.toThrow('already attempted');
+      await expect(claimSend(principal, owner.accountId, 'retryable', correctedInput)).rejects.toThrow('already attempted');
       await expect(claimSend(principal, owner.accountId, 'retryable', { ...input, subject: 'changed' })).rejects.toThrow('different content');
       if (redis) {
         let reachedEhlo!: () => void;

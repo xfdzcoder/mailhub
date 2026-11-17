@@ -54,10 +54,11 @@ export async function claimSend(owner: WorkOwner, accountId: string, operationKe
     const preparationExpiresAt = new Date(now.getTime() + sendOperationLimits.preparationMs);
     const expiresAt = new Date(now.getTime() + sendOperationLimits.replayMs);
     if (prior) {
-      if (prior.payloadHash !== payloadHash) throw new SendReplayError('Send operation identity was reused with different content');
+      if (prior.payloadHash !== payloadHash && prior.state !== 'RETRYABLE') throw new SendReplayError('Send operation identity was reused with different content');
       if (prior.state !== 'RETRYABLE' && !(prior.state === 'PREPARING' && prior.preparationExpiresAt <= now)) throw new SendReplayError('Send already attempted or in progress. Check delivery status before starting another send.');
-      // The row lock/CAS serializes recovery against beforeDelivery and maintenance.
-      const updated = await tx.sendOperation.updateMany({ where: { id: prior.id, generation: prior.generation, state: prior.state }, data: { state: 'PREPARING', generation, preparationExpiresAt, expiresAt } });
+      // A known pre-delivery failure permits edits under the same draft operation.
+      // The generation check prevents a stale retry from replacing a newer claim.
+      const updated = await tx.sendOperation.updateMany({ where: { id: prior.id, generation: prior.generation, state: prior.state }, data: { state: 'PREPARING', generation, payloadHash, preparationExpiresAt, expiresAt } });
       if (updated.count !== 1) throw new SendReplayError('Send operation fenced');
       return prior;
     }
