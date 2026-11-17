@@ -1,5 +1,7 @@
+import { IncomingBudgetError, INCOMING_LIMITS } from '@/lib/email/incoming-budget';
 import type { MessageStructureObject } from 'imapflow';
-import { simpleParser, ParsedMail, AddressObject } from 'mailparser';
+import { ParsedMail, AddressObject } from 'mailparser';
+import { parseBoundedMime } from '@/lib/email/mime-parser';
 import { createHash } from 'crypto';
 import { createEmailSnippet } from '@/lib/email/snippet';
 
@@ -86,7 +88,9 @@ export function extractImapAttachmentReferences(
 
   const parts: string[] = [];
 
+  let visited = 0;
   const visit = (node: MessageStructureObject) => {
+    if (++visited > INCOMING_LIMITS.parts) throw new IncomingBudgetError();
     if (isImapAttachmentNode(node) && node.part) {
       parts.push(node.part);
     }
@@ -101,8 +105,8 @@ export function extractImapAttachmentReferences(
   return parts.map((imapPart, ordinal) => ({ ordinal, imapPart }));
 }
 
-export async function parseEmail(raw: Buffer | string): Promise<ParsedEmailData> {
-  const parsed: ParsedMail = await simpleParser(raw);
+export async function parseEmail(raw: Buffer | string, signal?: AbortSignal): Promise<ParsedEmailData> {
+  const parsed: ParsedMail = await parseBoundedMime(raw, signal);
   const generatedMessageId = createHash('sha256').update(raw).digest('hex');
   const bodyHtml = (parsed.html as string | false) || null;
 

@@ -1,4 +1,12 @@
-jest.mock('fs/promises', () => ({
+jest.mock('@/lib/email/attachment-accounting', () => ({
+  storageKey: (filename: string) => filename,
+  reserveAttachment: jest.fn(async () => ({ id: 'synthetic-reservation' })),
+  publishAttachment: async (_reservation: unknown, publish: () => Promise<void>) => publish(),
+  commitAttachment: async () => {}, releaseAttachment: async () => {},
+  cleanupAttachment: async (_reservation: unknown, filename: string) => { await (await import('fs/promises')).unlink(filename); },
+}));
+jest.mock('fs/promises', () => ({ lstat: jest.fn(async () => ({ isSymbolicLink: () => false })), realpath: jest.fn(async (filename: string) => filename),
+  link: jest.fn().mockResolvedValue(undefined),
   mkdir: jest.fn().mockResolvedValue(undefined),
   writeFile: jest.fn(),
   unlink: jest.fn().mockResolvedValue(undefined),
@@ -10,9 +18,9 @@ import { validateOutgoingMail } from '@/lib/email/outgoing-budget';
 test('removes successful and partially written staging files after a later write fails', async () => {
   (writeFile as jest.Mock).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('disk full'));
   const att = { filename: 'x', contentType: 'application/octet-stream', content: 'YWJj' };
-  await expect(stageOutgoingFiles([att, att])).rejects.toThrow('disk full');
+  await expect(stageOutgoingFiles([att, att], undefined, { organizationId: 'synthetic', accountId: 'synthetic' })).rejects.toThrow('disk full');
   expect(writeFile).toHaveBeenCalledTimes(2);
-  expect(unlink).toHaveBeenCalledTimes(2);
+  expect(unlink).toHaveBeenCalledTimes(5);
   for (const call of (writeFile as jest.Mock).mock.calls) expect(unlink).toHaveBeenCalledWith(call[0]);
 });
 

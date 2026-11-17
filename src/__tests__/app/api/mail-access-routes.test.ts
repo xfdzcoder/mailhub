@@ -1,3 +1,4 @@
+import { IncomingBudgetError } from '@/lib/email/incoming-budget';
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
   requireAdmin: jest.fn(),
@@ -170,7 +171,8 @@ describe('mail content account access', () => {
         id: 'att-1',
         emailId: 'email-1',
         storagePath: '.storage/attachments/att-1',
-      })
+      }),
+      expect.any(AbortSignal)
     );
   });
 
@@ -205,7 +207,7 @@ describe('mail content account access', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Length')).toBe('3');
     expect(await response.text()).toBe('pdf');
-    expect(getReceivedAttachment).toHaveBeenCalledWith('email-1', 'att-1');
+    expect(getReceivedAttachment).toHaveBeenCalledWith('email-1', 'att-1', expect.any(AbortSignal));
   });
 
   it('serves a legacy received attachment from its existing storage path', async () => {
@@ -245,7 +247,8 @@ describe('mail content account access', () => {
         id: 'att-legacy',
         emailId: 'email-legacy',
         storagePath: '.storage/attachments/att-legacy',
-      })
+      }),
+      expect.any(AbortSignal)
     );
     expect(getReceivedAttachment).not.toHaveBeenCalled();
   });
@@ -273,6 +276,22 @@ describe('mail content account access', () => {
     );
 
     expect(response.status).toBe(404);
+  });
+
+  it('returns an explicit bounded export policy for oversized historical attachments', async () => {
+    (prisma.email.findFirst as jest.Mock).mockResolvedValue({ id: 'email-1' });
+    (prisma.attachment.findUnique as jest.Mock).mockResolvedValue({
+      id: 'att-1', emailId: 'email-1', storagePath: 'historical-fixture',
+    });
+    (readStoredAttachment as jest.Mock).mockRejectedValue(new IncomingBudgetError());
+    const response = await getAttachment(
+      new Request('http://localhost/api/accounts/all/emails/email-1/attachments/att-1') as NextRequest,
+      { params: Promise.resolve({ id: 'all', emailId: 'email-1', attachmentId: 'att-1' }) }
+    );
+    expect(response.status).toBe(413);
+    expect((await response.json()).error).toMatch(/export larger historical attachments/);
+    expect(getReceivedAttachment).not.toHaveBeenCalled();
+    expect(prisma.attachment.deleteMany).not.toHaveBeenCalled();
   });
 
   it('returns 502 for an authorized provider failure', async () => {

@@ -1,4 +1,7 @@
+import { assertWorkLease, workSignal } from '@/lib/workload/admission';
 import { validateOutgoingMail } from '@/lib/email/outgoing-budget';
+import { connect } from 'node:net';
+import type { SMTPTransportGetSocket } from 'nodemailer/lib/smtp-transport';
 import { createTransport, Transporter } from 'nodemailer';
 import { getDecryptedAccount } from '@/lib/accounts/service';
 import type { SendEmailInput } from '@/lib/validation';
@@ -8,7 +11,8 @@ import { createUniqueId } from '@/lib/identifiers';
 
 export async function sendGraphEmail(
   accessToken: string,
-  input: SendEmailInput
+  input: SendEmailInput,
+  beforeDelivery: () => Promise<void> = assertWorkLease,
 ): Promise<{ messageId: string }> {
   validateOutgoingMail(input);
   const url = 'https://graph.microsoft.com/v1.0/me/sendMail';
@@ -45,7 +49,10 @@ export async function sendGraphEmail(
     saveToSentItems: 'true',
   };
 
+  await beforeDelivery();
+  await assertWorkLease();
   const response = await fetch(url, {
+    signal: workSignal(),
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -64,14 +71,15 @@ export async function sendGraphEmail(
 
 export async function sendEmail(
   accountId: string,
-  input: SendEmailInput
+  input: SendEmailInput,
+  beforeDelivery: () => Promise<void> = assertWorkLease,
 ): Promise<{ messageId: string }> {
   validateOutgoingMail(input);
   const account = await getDecryptedAccount(accountId);
   if (account.provider !== 'gmail' && (account.provider === 'outlook' || account.oauthProvider === 'microsoft')) {
     const { getValidOAuthAccessToken } = await import('@/lib/accounts/tokens');
     const accessToken = await getValidOAuthAccessToken(account.id, 'https://graph.microsoft.com/.default offline_access');
-    return await sendGraphEmail(accessToken, input);
+    return await sendGraphEmail(accessToken, input, beforeDelivery);
   }
 
   const nodemailerAttachments = input.attachments?.map((att) => ({
@@ -106,6 +114,8 @@ export async function sendEmail(
     const rawBuffer = await message.build();
 
     const accessToken = await getValidAccessToken(account.id);
+    await beforeDelivery();
+    await assertWorkLease();
     const result = await sendMessageRaw(accessToken, rawBuffer);
 
     // Attempt to queue the email to be fully indexed immediately or just rely on the sync worker
@@ -118,7 +128,19 @@ export async function sendEmail(
 
     const smtpDestination = await resolveSafeOutboundHost(account.smtpHost);
 
+    const signal = workSignal();
+    // Own the underlying socket so lease loss can stop later SMTP commands,
+    // including after STARTTLS wraps this connection.
+    const getSocket: SMTPTransportGetSocket = (_options, callback) => {
+      const socket = connect({ host: smtpDestination.address, port: account.smtpPort || 587, signal });
+      let connected = false;
+      socket.setTimeout(10000, () => socket.destroy(new Error('SMTP connection timeout')));
+      socket.once('connect', () => { connected = true; socket.setTimeout(0); callback(null, { connection: socket }); });
+      socket.once('error', error => { if (!connected) callback(error, false); });
+    };
     const transporter: Transporter = createTransport({
+      ...(signal ? { getSocket } : {}),
+      connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 30000,
       host: smtpDestination.address,
       port: account.smtpPort || 587,
       secure: account.smtpSecure ?? false,
@@ -131,7 +153,13 @@ export async function sendEmail(
       },
     });
 
-    const info = await transporter.sendMail(mailOptions);
+    await beforeDelivery();
+    await assertWorkLease();
+    const stop = () => transporter.close();
+    signal?.addEventListener('abort', stop, { once: true });
+    let info;
+    try { info = await transporter.sendMail(mailOptions); }
+    finally { signal?.removeEventListener('abort', stop); transporter.close(); }
 
     // If IMAP settings are available, attempt to append sent message to IMAP Sent folder
     if (account.imapHost && account.passwordEncrypted) {
@@ -161,6 +189,7 @@ export async function sendEmail(
           logger: false,
         });
 
+        await assertWorkLease();
         await client.connect();
         const list = await client.list();
         const sentMailbox =
@@ -170,6 +199,7 @@ export async function sendEmail(
               m.path.toLowerCase().includes('sent')
           )?.path || 'Sent';
 
+        await assertWorkLease();
         await client.append(sentMailbox, rawBuffer, ['\\Seen']);
         await client.logout();
       } catch (err) {

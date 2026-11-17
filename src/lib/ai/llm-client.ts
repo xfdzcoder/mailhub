@@ -1,3 +1,4 @@
+import { readAiCredentials } from '@/lib/integrations/credentials';
 import { modelPostJson, modelUrl, OriginPolicyError, OutboundTimeoutError } from '@/lib/network/origin-policy';
 import { prisma } from '@/lib/db/prisma';
 import { getSystemPreferences } from '@/lib/settings/system-preferences';
@@ -55,11 +56,12 @@ export async function getResolvedAiConfig(organizationId: string, userId?: strin
   }
 
   if (setting) {
+    const credentials = readAiCredentials(setting);
     return {
       provider: setting.aiProvider || 'openai',
-      apiKey: setting.aiApiKey || null,
-      tenantEndpoint: !!setting.aiBaseUrl,
-      baseUrl: setting.aiBaseUrl || (setting.aiProvider === 'ollama' || setting.aiProvider === 'local_llm' ? 'http://localhost:11434/v1' : null),
+      apiKey: credentials.aiApiKey || null,
+      tenantEndpoint: !!credentials.aiBaseUrl,
+      baseUrl: credentials.aiBaseUrl || (setting.aiProvider === 'ollama' || setting.aiProvider === 'local_llm' ? 'http://localhost:11434/v1' : null),
       modelName: setting.aiModelName || 'gpt-4o-mini',
     };
   }

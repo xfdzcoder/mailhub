@@ -1,3 +1,6 @@
+import { assertWorkLease } from '@/lib/workload/admission';
+import { processAdmitted } from '@/lib/workload/processor';
+import { readWebhookCredentials } from '@/lib/integrations/credentials';
 import { Worker, Job } from 'bullmq';
 import type { QueueOptions } from 'bullmq';
 import Redis from 'ioredis';
@@ -34,7 +37,12 @@ export interface SummaryJobPayload {
 }
 
 export async function executeSummaryRun(payload: SummaryJobPayload): Promise<void> {
-  const { summaryRunId, organizationId, labelId, webhookIds, timeRangeHours, limit = 25 } = payload;
+  const run = await prisma.emailSummaryRun.findUnique({ where: { id: payload.summaryRunId } });
+  if (!run) return;
+  const { id: summaryRunId, organizationId, labelId } = run;
+  const webhookIds = payload.webhookIds?.slice(0, 20);
+  const limit = Math.min(100, Math.max(1, Number(payload.limit) || 25));
+  const timeRangeHours = Math.min(720, Math.max(1, Number(payload.timeRangeHours) || 24));
 
   // Atomically claim the job by transitioning status from QUEUED -> SUMMARIZING
   const claimResult = await prisma.emailSummaryRun.updateMany({
@@ -163,8 +171,8 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
       });
 
       emailIdsFromMeilisearch = (searchRes.hits || []).map((hit) => hit.id);
-    } catch (searchError) {
-      console.warn('Meilisearch email query failed, falling back to PostgreSQL query:', searchError);
+    } catch {
+      console.warn('Meilisearch email query failed, falling back to PostgreSQL query');
     }
 
     let rawEmails: Array<{
@@ -289,11 +297,10 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
     let fallbackReason: AiUnavailableError['reason'] | null = aiEnabled ? null : 'disabled';
     if (aiEnabled) {
       try {
+        await assertWorkLease();
         summaryText = await generateEmailBatchSummary({
           organizationId,
           provider,
-          apiKey: settings?.aiApiKey,
-          baseUrl: settings?.aiBaseUrl,
           modelName,
           customPrompt: settings?.aiCustomPrompt,
           labelName,
@@ -362,9 +369,10 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
         );
 
         for (const webhook of webhooks) {
+          await assertWorkLease();
           const dispatchRes = await dispatchWebhookNotification({
             type: webhook.type as import('@/lib/notifications/types').WebhookType,
-            config: webhook.config,
+            config: readWebhookCredentials(webhook),
             labelName,
             summaryText,
             emailCount: emailsToSummarize.length,
@@ -395,27 +403,31 @@ export async function executeSummaryRun(payload: SummaryJobPayload): Promise<voi
     await completeAgentRun(summaryRunId, summaryText, emailsToSummarize.length, webhookLogs);
 
     console.log(`Successfully completed email summary run ${summaryRunId}`);
-  } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
+  } catch {
+    const errorMsg = 'Summary job failed';
     console.error(`Email summary job ${summaryRunId} failed:`, errorMsg);
 
-    await prisma.emailSummaryRun.update({
-      where: { id: summaryRunId },
-      data: {
-        status: 'FAILED',
-        errorMessage: errorMsg,
-      },
-    });
+    try {
+      await prisma.emailSummaryRun.update({
+        where: { id: summaryRunId },
+        data: {
+          status: 'FAILED',
+          errorMessage: errorMsg,
+        },
+      });
 
-    await failAgentRun(summaryRunId, errorMsg);
-    throw err;
+      await failAgentRun(summaryRunId, errorMsg);
+    } catch {
+      // Failure reporting must not expose a raw database error either.
+    }
+    throw new Error(errorMsg);
   }
 }
 
 export const summaryWorker = new Worker<SummaryJobPayload>(
   'email-summary',
   async (job: Job<SummaryJobPayload>) => {
-    await executeSummaryRun(job.data);
+    await processAdmitted(job, () => executeSummaryRun(job.data));
   },
   {
     connection: workerRedis as unknown as QueueOptions['connection'],
@@ -423,6 +435,6 @@ export const summaryWorker = new Worker<SummaryJobPayload>(
   }
 );
 
-summaryWorker.on('failed', (job, err) => {
-  console.error(`Summary worker job ${job?.id} failed:`, err.message);
+summaryWorker.on('failed', (job) => {
+  console.error(`Summary worker job ${job?.id} failed:`, 'Summary job failed');
 });

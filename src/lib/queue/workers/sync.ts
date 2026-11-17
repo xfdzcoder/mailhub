@@ -1,3 +1,5 @@
+import { processAdmitted } from '@/lib/workload/processor';
+import { clearIncomingRejections, syncRevision } from '@/lib/email/incoming-rejections';
 import { Worker, Job } from 'bullmq';
 import type { QueueOptions } from 'bullmq';
 import Redis from 'ioredis';
@@ -7,7 +9,7 @@ import { imapManager } from '@/lib/imap/connection-manager';
 import { gmailSyncManager } from '@/lib/gmail/sync-manager';
 import { IncompleteSyncError } from '@/lib/sync-result';
 import { runtimeConfig } from '@/lib/runtime-config';
-import { enqueueInitialSync, getSyncQueueName } from '@/lib/queue/client';
+import { enqueueInitialSync, getSyncQueue, getSyncQueueName } from '@/lib/queue/client';
 
 const WORKER_PARTITION = process.env.WORKER_PARTITION || 'default';
 const LEGACY_SYNC_QUEUE_NAME = 'imap-sync';
@@ -23,6 +25,7 @@ const workerRedis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379',
 });
 
 export interface SyncJobPayload {
+  resetIncoming?: boolean;
   accountId: string;
   folder: string; // 'ALL', 'INBOX', 'SENT', 'DRAFTS', 'TRASH'
   // Legacy imap-sync jobs did not include this. DB ownership remains authoritative.
@@ -50,12 +53,13 @@ async function processSyncJob(
   workerPartition: string
 ): Promise<void> {
     const { accountId, folder } = job.data;
+    const cutoff = new Date();
     
     console.log(`Starting sync for account ${accountId}, folder: ${folder}`);
     
     if (job.name === 'initial-sync' || folder === 'ALL') {
       console.log('Fetching account from prisma...');
-      const account = await prisma.emailAccount.findUnique({
+      let account = await prisma.emailAccount.findUnique({
         where: { id: accountId }
       });
       console.log('Fetched account from prisma.');
@@ -69,10 +73,21 @@ async function processSyncJob(
             isLegacyQueue ? 'legacy queue' : `worker ${workerPartition}`
           } to ${accountPartition}`
         );
-        await enqueueInitialSync(account);
+        if (job.data.resetIncoming) {
+          await getSyncQueue(account.workerPartition).add('initial-sync', { ...job.data, workerPartition: accountPartition }, { jobId: `resync-${accountId}`, removeOnComplete: true, removeOnFail: true });
+        } else {
+          await enqueueInitialSync(account);
+        }
         return;
       }
       
+      if (job.data.resetIncoming) {
+        await clearIncomingRejections(accountId);
+        const refreshed = await prisma.emailAccount.findUnique({ where: { id: accountId } });
+        if (!refreshed) return;
+        account = refreshed;
+      }
+
       if (account.provider === 'gmail') {
         // Keep incremental polling alive even when the historical backfill
         // fails (for example because Gmail temporarily throttles the API).
@@ -106,9 +121,9 @@ async function processSyncJob(
       
       // Update account sync timestamp
       await prisma.emailAccount.update({
-        where: { id: accountId },
+        where: { id: accountId, updatedAt: syncRevision(account.updatedAt) },
         data: { 
-          lastSyncedAt: new Date(),
+          lastSyncedAt: cutoff,
           ...(account.initialSyncCompletedAt ? {} : { initialSyncCompletedAt: new Date() })
         }
       });
@@ -139,10 +154,10 @@ async function processSyncJob(
 const createSyncWorker = (queueName: string, workerPartition: string, isLegacyQueue = false) =>
   new Worker<SyncJobPayload>(
     queueName,
-    (job) => processSyncJob(job, isLegacyQueue, workerPartition),
+    (job) => processAdmitted(job, () => processSyncJob(job, isLegacyQueue, workerPartition)),
     {
-    connection: workerRedis as unknown as QueueOptions['connection'],
-      concurrency: runtimeConfig.syncWorkerConcurrency,
+      connection: workerRedis as unknown as QueueOptions['connection'],
+      concurrency: Math.max(2, runtimeConfig.syncWorkerConcurrency),
     }
   );
 

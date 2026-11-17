@@ -1,3 +1,12 @@
+jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(), assertWorkLease: async () => {}, AdmissionError: class extends Error {} }));
+jest.mock('@/lib/email/attachment-accounting', () => ({
+  storageKey: (filename: string) => filename,
+  reserveAttachment: jest.fn(async () => ({ id: 'reservation' })),
+  publishAttachment: async (_reservation: unknown, publish: () => Promise<void>) => publish(),
+  commitAttachment: async () => {}, releaseAttachment: async () => {},
+  cleanupAttachment: async (_reservation: unknown, filename: string) => { await (await import('fs/promises')).unlink(filename); },
+  cleanupReplacedAttachment: async (filename: string) => { if (await (await import('@/lib/db/prisma')).prisma.attachment.count({ where: { storagePath: filename } }) === 0) await (await import('fs/promises')).unlink(filename); },
+}));
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(async () => ({ organizationId: 'org', userId: 'user', role: 'admin' })),
   apiResponse: (data: unknown) => Response.json(data),
@@ -10,7 +19,7 @@ jest.mock('@/lib/db/prisma', () => ({ prisma: {
   $transaction: jest.fn(),
 } }));
 jest.mock('uuid', () => ({ v4: () => 'synthetic-message' }));
-jest.mock('fs/promises', () => ({ mkdir: jest.fn(), writeFile: jest.fn(), unlink: jest.fn() }));
+jest.mock('fs/promises', () => ({ lstat: jest.fn(async () => ({ isSymbolicLink: () => false })), realpath: jest.fn(async (filename: string) => filename), link: jest.fn().mockResolvedValue(undefined), mkdir: jest.fn(), writeFile: jest.fn(), unlink: jest.fn() }));
 import { PUT } from '@/app/api/accounts/[id]/drafts/route';
 import { prisma } from '@/lib/db/prisma';
 import { writeFile, unlink } from 'fs/promises';

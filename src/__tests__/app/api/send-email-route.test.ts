@@ -1,3 +1,13 @@
+jest.mock('@/lib/workload/admission', () => ({ withWork: async (_owner: unknown, run: () => Promise<unknown>) => run(), assertWorkLease: async () => {}, AdmissionError: class extends Error {} }));
+jest.mock('@/lib/email/attachment-accounting', () => ({
+  storageKey: (filename: string) => filename,
+  reserveAttachment: jest.fn(async () => ({ id: 'reservation' })),
+  publishAttachment: async (_reservation: unknown, publish: () => Promise<void>) => publish(),
+  commitAttachment: async () => {}, releaseAttachment: async () => {},
+  cleanupAttachment: async (_reservation: unknown, filename: string) => { await (await import('fs/promises')).unlink(filename); },
+  cleanupReplacedAttachment: async (filename: string) => { if (await (await import('@/lib/db/prisma')).prisma.attachment.count({ where: { storagePath: filename } }) === 0) await (await import('fs/promises')).unlink(filename); },
+}));
+jest.mock('@/lib/workload/send-once', () => ({ claimSend: async () => ({ beforeDelivery: async () => {}, delivered: async () => {}, failedBeforeDelivery: async () => {} }), SendReplayError: class extends Error {} }));
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
   apiResponse: (data: unknown, status = 200) =>
@@ -29,7 +39,8 @@ jest.mock('@/lib/activity/log', () => ({
   logActivity: jest.fn(),
 }));
 
-jest.mock('fs/promises', () => ({
+jest.mock('fs/promises', () => ({ lstat: jest.fn(async () => ({ isSymbolicLink: () => false })), realpath: jest.fn(async (filename: string) => filename),
+  link: jest.fn().mockResolvedValue(undefined),
   mkdir: jest.fn(),
   writeFile: jest.fn(),
   unlink: jest.fn().mockResolvedValue(undefined),
@@ -194,7 +205,7 @@ describe('POST sent email', () => {
       params: Promise.resolve({ id: 'account-1' }),
     });
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(502);
     expect(mockCreateEmail).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
@@ -209,7 +220,7 @@ describe('POST sent email', () => {
   it('cleans files and does not deliver after disk failure', async () => {
     mockWriteFile.mockRejectedValueOnce(new Error('disk full'));
     const response = await POST(createRequest({ attachments: [{ filename: 'x', contentType: 'text/plain', content: 'YWJj' }] }), { params: Promise.resolve({ id: 'account-1' }) });
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(502);
     expect(fs.unlink).toHaveBeenCalled();
     expect(mockSendEmail).not.toHaveBeenCalled();
     expect(mockCreateEmail).not.toHaveBeenCalled();
