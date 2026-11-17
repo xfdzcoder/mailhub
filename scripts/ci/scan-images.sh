@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scan actual final images, including npm's independent global dependency tree.
+# Scan actual final images, including global worker tooling.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 command -v docker >/dev/null
@@ -19,7 +19,8 @@ for target in runtime migrate; do
   if ! docker image inspect "$image" > "$output/$target-image.json"; then status=1; continue; fi
   if ! docker run --rm --entrypoint sh "$image" -ec '
     node --version
-    npm --version
+    ! command -v npm
+    ! command -v npx
     cat /etc/alpine-release
     apk info -vv
     apk info -L zlib
@@ -35,7 +36,7 @@ for target in runtime migrate; do
           }
         }
       }
-      walk("/usr/local/lib/node_modules");
+      if (fs.existsSync("/usr/local/lib/node_modules")) walk("/usr/local/lib/node_modules");
     '\''
   ' > "$output/$target-base-packages.txt"; then status=1; fi
   # Empty ignore file prevents ambient/local exceptions from hiding findings.

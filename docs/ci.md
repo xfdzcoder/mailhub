@@ -57,6 +57,6 @@ target and Web/Worker runtime use the same Node major.
 CI also calls `image-security.yml` with read permissions to build, smoke-test,
 inventory and scan both final images. The development publication job requires
 this check. See [base-image-security.md](base-image-security.md) for the pinned
-Node/Alpine digest, zlib patch, unresolved upstream npm findings, scanner policy,
+Node/Alpine digest, zlib patch, build-only npm, scanner policy,
 local commands and evidence limitations. No application lockfile changes or
 unreviewed vulnerability exceptions are part of this base-image update.

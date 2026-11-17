@@ -59,17 +59,13 @@ was inspected directly. Registry bulk advisory ranges confirm brace-expansion
 5.0.12 and undici 6.29.1 are outside the affected ranges for the listed findings.
 This is package metadata evidence, not a passing final-image scan.
 
-**Remaining:** glob 13.0.6 (CVE-2026-118773 / GHSA-3g3m-2fjr-6pw4;
-affected `>=9.0.0 <=14.0.1`) and minimatch 10.2.5
-(CVE-2026-118764 / GHSA-g3hv-75wg-m249; affected `>=7.0.0 <11.0.1`).
-Their package source is npm 11.21.2's published bundle under the paths above,
-in both final images. The latest npm 11 patch still includes these versions;
-retain them as unresolved pending a patched upstream bundle and a fresh scan.
-This is not a claim that individual package patches are unavailable.
-Do not replace nested vendored files or add application overrides to disguise
-these copies. npm/npx remain required by the migration and Worker commands.
-Other application and migration-only findings in that run are outside this
-base-image change and remain subject to their existing gates.
+The published npm bundle still contains affected glob and minimatch versions.
+The final images now omit npm altogether. Build stages use npm for dependency
+installation and Prisma generation. The runtime copies tsx for the Worker, and
+the migration image executes the installed Prisma CLI directly. The image
+entrypoint maps the existing `npm run worker` and `npx [--no-install] prisma …`
+container commands to those binaries. For commands executed inside a running
+migration container, use `/app/node_modules/.bin/prisma` directly.
 
 ## Reproducible verification and gates
 
@@ -90,7 +86,7 @@ Worker heartbeat checks, and then scans both final images even if smoke fails.
 The existing development publication job now requires this workflow to pass.
 No images are published by the security workflow.
 
-Artifacts contain the pinned base reference, final image IDs, Node/npm/Alpine
+Artifacts contain the pinned base reference, final image IDs, Node/Alpine
 versions, OS package inventory, zlib paths, every global package manifest path
 and version (including the separately installed runtime tsx), scanner version,
 and full Trivy JSON with OS and language package inventories. Local output
@@ -110,8 +106,7 @@ metadata checks establish the base selection and available OS patch, not a
 passing final-image scan. Docker/Compose and a Docker socket are unavailable in
 this environment: final builds, Prisma generation in Alpine, migration execution,
 Web/Worker startup and both final-image vulnerability scans must run in CI.
-The remaining glob/minimatch findings are expected to keep the security gate red
-until an upstream patched bundle is selected. Do not describe the images as clean or
-merge on the strength of mocked scanner tests. Nothing was deployed.
+The smoke test asserts npm and npx are absent from the final images and exercises
+the existing Worker and migration invocation paths. Scan both resulting filesystems.
 
 This change has no visual impact; no preview files are needed.
