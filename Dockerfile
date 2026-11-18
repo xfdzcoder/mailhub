@@ -12,6 +12,15 @@ RUN npm install --global --ignore-scripts npm@11.21.2 \
 # Package managers are needed only while building the image. The entrypoint
 # translates the existing Docker commands to their already-installed programs.
 FROM base AS final-base
+# Keep application code root-owned; only these runtime paths are writable.
+RUN addgroup -S -g 10001 mailhub \
+    && adduser -S -D -H -u 10001 -G mailhub mailhub \
+    && mkdir -p /app/.storage /app/.cache /home/mailhub \
+    && chown 10001:10001 /app/.storage /app/.cache /home/mailhub \
+    && chmod 700 /app/.storage /app/.cache /home/mailhub
+ENV HOME=/home/mailhub
+ENV XDG_CACHE_HOME=/app/.cache
+ENV TMPDIR=/tmp
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 COPY --chmod=755 docker/mailhub-entrypoint.sh /usr/local/bin/mailhub-entrypoint
 ENTRYPOINT ["/usr/local/bin/mailhub-entrypoint"]
@@ -28,6 +37,7 @@ RUN npx prisma generate
 FROM final-base AS migrate
 COPY --from=deps /app ./
 COPY prisma.config.ts ./prisma.config.ts
+USER 10001:10001
 CMD ["/app/node_modules/.bin/prisma", "migrate", "deploy"]
 
 # Build
@@ -71,6 +81,12 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/prisma ./prisma
 COPY --from=production-deps /app/node_modules ./node_modules
+
+# Next.js writes its image/incremental cache here, independently of attachments.
+RUN mkdir -p /app/.next/cache \
+    && chown -R 10001:10001 /app/.next/cache \
+    && chmod -R u=rwX,go= /app/.next/cache
+USER 10001:10001
 
 EXPOSE 3000
 ENV PORT=3000
