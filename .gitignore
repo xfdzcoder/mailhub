@@ -50,3 +50,6 @@ AGENTS.md
 CLAUDE.md
 .storage/
 .worktrees/
+
+# Local security evidence is transient.
+/security-evidence/

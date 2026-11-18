@@ -54,9 +54,9 @@ target and Web/Worker runtime use the same Node major.
 
 ## Final image security
 
-CI also calls `image-security.yml` with read permissions to build, smoke-test,
-inventory and scan both final images. The development publication job requires
-this check. See [base-image-security.md](base-image-security.md) for the pinned
-Node/Alpine digest, zlib patch, build-only npm, scanner policy,
-local commands and evidence limitations. No application lockfile changes or
-unreviewed vulnerability exceptions are part of this base-image update.
+CI builds and smoke-tests the runtime and migration images, scans both
+filesystems and publishes the tested runtime only after all gates pass.
+The separate `image-security.yml` workflow remains available for manual
+verification of the package-manager-free images. See
+[security-gates.md](security-gates.md) for the release gates and
+[base-image-security.md](base-image-security.md) for image inventory.
