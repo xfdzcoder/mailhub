@@ -29,3 +29,10 @@ Run `npm run test:browser` after `npx playwright install chromium`. Tests mount 
 real reader component with synthetic mail and a loopback-only HTTP service. They
 exercise script/DOM isolation, navigation/popups, forms, CSS/resource filtering,
 CID display, ordinary layout, remote-image consent/reset and oversized HTML.
+
+## Synthetic browser preview
+
+The browser fixture uses synthetic content to show remote images blocked while
+inline CID images and ordinary text remain readable.
+
+![Synthetic mail with remote images blocked](mail-html-example.png)
