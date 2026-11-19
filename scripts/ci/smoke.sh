@@ -41,6 +41,38 @@ for target in runtime migrate; do
     }
   '
 done
+# Fresh named volume gets the image directory ownership on first mount.
+"${compose[@]}" run --rm -T -e INVENTORY_TARGET=runtime web node --input-type=module \
+  < scripts/ci/container-permissions.mjs
+"${compose[@]}" run --rm -T -e INVENTORY_TARGET=migrate migrate node --input-type=module \
+  < scripts/ci/container-permissions.mjs
+# Simulate a root-owned volume from an older deployment. Startup must fail,
+# then a narrowly scoped offline repair must preserve its synthetic attachment.
+"${compose[@]}" run --rm --user 0:0 --entrypoint sh web -ec '
+  mkdir -p /app/.storage/legacy
+  printf "synthetic existing attachment\n" > /app/.storage/legacy/attachment.txt
+  chown -R 0:0 /app/.storage
+  chmod 700 /app/.storage /app/.storage/legacy
+  chmod 600 /app/.storage/legacy/attachment.txt
+'
+if permission_error=$("${compose[@]}" run --rm web node -e 'process.exit(0)' 2>&1); then
+  echo 'Root-owned legacy storage unexpectedly accepted' >&2
+  exit 1
+fi
+if [[ $permission_error != *'/app/.storage must be writable by UID/GID 10001:10001'* ]]; then
+  echo "Unexpected startup failure: $permission_error" >&2
+  exit 1
+fi
+"${compose[@]}" run --rm --user 0:0 --entrypoint sh web -ec '
+  find /app/.storage -xdev -type d -exec chown 10001:10001 {} +
+  find /app/.storage -xdev -type f -exec chown 10001:10001 {} +
+'
+"${compose[@]}" run --rm -T -e INVENTORY_TARGET=runtime web node --input-type=module \
+  < scripts/ci/container-permissions.mjs
+"${compose[@]}" run --rm worker node -e '
+  const fs = require("node:fs");
+  if (!fs.readFileSync("/app/.storage/legacy/attachment.txt", "utf8").includes("read and updated by UID 10001")) process.exit(1);
+'
 "${compose[@]}" up -d --wait postgres redis meilisearch
 "${compose[@]}" run --rm migrate
 # A second deployment must be a no-op, proving the migration command is repeatable.
@@ -89,7 +121,17 @@ for attempt in {1..60}; do
   if "${compose[@]}" exec -T web node -e \
     'fetch("http://127.0.0.1:3000/api/version").then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))' >/dev/null 2>&1 \
     && [[ $("${compose[@]}" exec -T redis redis-cli EXISTS worker:default:heartbeat) == 1 ]]; then
-    echo 'PASS: migrations, Web HTTP endpoint, and Worker Redis heartbeat'
+    for service in web worker; do
+      "${compose[@]}" exec -T "$service" node -e '
+        const assert = require("node:assert/strict");
+        const fs = require("node:fs");
+        assert.equal(process.getuid(), 10001);
+        assert.equal(process.getgid(), 10001);
+        assert.equal(fs.readFileSync("/app/.storage/legacy/attachment.txt", "utf8"),
+          "synthetic existing attachment\nread and updated by UID 10001\n");
+      '
+    done
+    echo 'PASS: unprivileged migrations, Web HTTP endpoint, Worker Redis heartbeat and shared storage'
     exit 0
   fi
   sleep 2

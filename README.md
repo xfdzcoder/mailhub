@@ -339,6 +339,7 @@ docker pull kawing11a/mailhub:0.4.0
 # Run MailHub web container (using your .env file)
 docker run -d \
   --name mailhub-web \
+  -v mailhub_storage:/app/.storage \
   -p 3000:3000 \
   --env-file .env \
   kawing11a/mailhub:0.4.0
@@ -346,6 +347,7 @@ docker run -d \
 # Run background worker container
 docker run -d \
   --name mailhub-worker \
+  -v mailhub_storage:/app/.storage \
   --env-file .env \
   kawing11a/mailhub:0.4.0 \
   npm run worker
@@ -361,7 +363,11 @@ docker compose up -d --build
 
 The Dockerfile uses a multi-stage build (`deps` → `build` → `runner`) producing a lean production image. Workers run as separate containers using the same image with `npm run worker` as the entrypoint.
 
-When upgrading an existing deployment, run `npx prisma migrate deploy` before starting the `0.4.0` web and worker containers.
+Newly built Web, Worker, and migration containers run as UID/GID `10001:10001`.
+Mount the same writable volume at `/app/.storage` for Web and every Worker.
+Before upgrading an existing volume, follow the [container permissions and recovery guide](docs/container-permissions.md).
+It lists writable cache paths, scoped ownership preparation, and backup/rollback steps.
+Run `npx prisma migrate deploy` using the dedicated `migrate` image before starting Web and Workers.
 
 ## Project Structure
 
