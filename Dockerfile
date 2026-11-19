@@ -1,8 +1,11 @@
 # Node 24 LTS / Alpine 3.24. Pin the multi-platform index so every target uses
 # the same reviewed Node and OS packages. See docs/base-image-security.md.
 FROM node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS base
-# The pinned image predates Alpine's CVE-2026-4738 fix. Apply it to all targets.
-RUN apk add --no-cache --upgrade zlib=1.4-r0
+# Apply Alpine's zlib and OpenSSL security backports to every target.
+RUN apk add --no-cache --upgrade \
+    zlib=1.4-r0 \
+    libcrypto3=3.5.9-r1 \
+    libssl3=3.5.9-r1
 WORKDIR /app
 
 FROM base AS build-base
