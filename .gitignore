@@ -53,3 +53,6 @@ CLAUDE.md
 
 # Local security evidence is transient.
 /security-evidence/
+
+/test-results/
+/playwright-report/
