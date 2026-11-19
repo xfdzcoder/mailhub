@@ -1,6 +1,7 @@
 # Node / Alpine base image findings (issue #60)
 
-Checked 2026-11-12. Application `package.json` and `package-lock.json` are
+Base inspected 2026-11-12; OpenSSL backport checked 2026-11-19.
+Application `package.json` and `package-lock.json` are
 unchanged: their overrides and audit do not control npm's bundled dependencies.
 
 ## Selected base and OS patch
@@ -32,6 +33,33 @@ the fix. No edge repository or blanket distribution upgrade is used.
 The base's library is `/usr/lib/libz.so.1` (versioned target `/usr/lib/libz.so.1.3.2`);
 its package source is Alpine `main`, source package `zlib`, not npm.
 The final-image inventory records `apk info -L zlib` to verify installed paths.
+
+## Alpine OpenSSL security backport (issue #77)
+
+Fresh scans on 2026-11-19 report five advisories against each of the pinned
+base's `libcrypto3` and `libssl3` 3.5.9-r0 packages. The stable Alpine 3.24
+[OpenSSL build recipe](https://github.com/alpinelinux/aports/blob/3.24-stable/main/openssl/APKBUILD)
+records 3.5.9-r1 as the distribution backport for CVE-2026-88822, CVE-2026-88823,
+CVE-2026-95691, CVE-2026-95692 and CVE-2026-107496. The stable repository
+publishes both shared-library packages. The
+[security database](https://secdb.alpinelinux.org/v3.24/main.json) is the
+downstream vulnerability feed. Install their exact patched versions in
+the common base, alongside the existing zlib patch. The smoke check inspects
+both actual final images with `apk list --installed`, then exercises migrations,
+Web and Worker.
+
+This patches Alpine's shared libraries. Node 24.22.3 retains its separately
+vendored OpenSSL 3.5.9; an apk upgrade does not replace Node's embedded library.
+Node's published release index still lists 24.22.3 as the latest Node 24 release
+at this check. Preserve the pinned Node/image digest and verify later Node
+security releases separately. No application lockfile or exception changes are
+needed for this distribution backport.
+
+The main CI's current release gate uses `scripts/ci/install-scanner.sh` and
+`scripts/ci/scan.sh source|runtime|migrate`, with Trivy 0.69.3. It scans the actual
+smoke-tested images before publication. All severities remain blocking and the
+exception list remains empty. The scan-images workflow described below is the
+earlier auxiliary workflow; it is not the main CI's publication gate.
 
 ## npm bundle update and remaining findings
 
