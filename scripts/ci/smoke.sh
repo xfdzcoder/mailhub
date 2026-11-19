@@ -15,6 +15,13 @@ trap cleanup EXIT
 for target in runtime migrate; do
   image=${RUNTIME_IMAGE:-mailhub-smoke:runtime}
   if [[ $target == migrate ]]; then image=${MIGRATION_IMAGE:-mailhub-smoke:migrate}; fi
+  docker run --rm --entrypoint sh "$image" -ec '
+    for package in libcrypto3 libssl3; do
+      installed=$(apk list --installed "$package" | cut -d " " -f 1)
+      test "$installed" = "$package-3.5.9-r1"
+      printf "%s\n" "$installed"
+    done
+  '
   docker run --rm -e INVENTORY_TARGET="$target" --entrypoint node "$image" -e '
     const fs = require("node:fs");
     console.log(process.env.INVENTORY_TARGET, "Node", process.versions.node);
