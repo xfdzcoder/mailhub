@@ -1,5 +1,46 @@
 # Prisma tooling update (issue #17)
 
+## Effect security repair (issue #82)
+
+The root `effect: 3.22.1` override repairs
+[CVE-2026-121707 / GHSA-7589-6fvf-x4pw](https://github.com/Effect-TS/effect/security/advisories/GHSA-7589-6fvf-x4pw)
+(affected through 3.22.0). `@prisma/config@7.10.1` pins Effect to 3.20.0;
+`@hookform/resolvers@5.9.1` has an optional `effect ^3.10.3` peer, satisfied
+by the same patched copy. The override covers all paths while keeping Prisma
+CLI, client and PostgreSQL adapter at 7.10.1. Effect's own dependency requirements
+are unchanged. No scanner policy, exception, schema or migration changes are needed.
+
+Remove the override when a compatible Prisma 7 release uses patched Effect
+without it. Refresh the lockfile and verify that a clean Node 24 `npm ci` and
+`npm ls effect` contain only patched copies with no invalid dependencies, then
+repeat Prisma config loading, generation, schema validation, disposable PostgreSQL
+migration/adapter checks and the application/security checks below.
+
+Validation on 2026-11-20 with Node **24.22.3**:
+
+- Clean `npm ci` passed, including a second isolated install of the final focused
+  lockfile. `npm ls effect` showed one shared 3.22.1 copy with no invalid entries.
+- Prisma generate and validate loaded the existing `prisma.config.ts` successfully.
+  All 27 migrations deployed to a fresh local PostgreSQL 15.18
+  `mailhub_effect_test` database; a second deploy had no pending migrations.
+  The 7.10.1 PostgreSQL adapter passed a database identity check, generated-client
+  create/read/delete operations and transaction rollback. The temporary cluster
+  was stopped afterward; no operator database was used.
+- The Effect resolver passed valid input decoding and invalid input error handling.
+- Lint, TypeScript and production build passed. The complete default unit command
+  passed 126 Jest suites / 906 tests, with 6 suites / 32 tests skipped by the
+  existing suite configuration; its three tooling checks also passed.
+- All 14 security and image-scan policy tests passed. Trivy **0.69.3**, installed
+  with the existing pinned checksum and a normal database refresh, passed the
+  source gate: 989 inventoried packages, zero unaccepted vulnerabilities and zero
+  secrets. `npm audit --package-lock-only` also reported zero vulnerabilities.
+- Docker is unavailable, so actual runtime/migration image scans and container
+  smoke checks remain for CI. Browser checks require Chromium system libraries
+  absent from this environment (including GLib, NSS, ATK and X11).
+
+Security gates, all-severity policy and empty exception inventory are unchanged.
+This dependency repair has no visible UI change and requires no preview.
+
 ## Compatibility and dependency selection
 
 Pin `prisma`, `@prisma/client`, and `@prisma/adapter-pg` to **7.10.1**.

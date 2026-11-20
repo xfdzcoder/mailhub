@@ -90,6 +90,7 @@
     "typescript": "^5"
   },
   "overrides": {
+    "effect": "3.22.1",
     "@jest/reporters": {
       "glob": "14.0.6"
     },
