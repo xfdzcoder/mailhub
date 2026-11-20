@@ -127,7 +127,7 @@ export async function withWork<T>(owner: WorkOwner, run: () => Promise<T>, bytes
   const controller = new AbortController();
   let closed = false;
   let checking: Promise<void> | undefined;
-  const lose = () => { controller.abort(); };
+  const lose = () => { controller.abort(new AdmissionError(true)); };
   const check = async () => {
     if (closed || controller.signal.aborted) throw new AdmissionError(true);
     checking ??= (async () => {

@@ -1,3 +1,4 @@
+import { attachmentResponse } from '@/lib/workload/attachment-response';
 import Redis from 'ioredis';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -23,14 +24,17 @@ integration('distributed workload admission with disposable Redis', () => {
   let b: Redis;
   let oldUrl: string | undefined;
   let socket: string;
+  let admissionClient: Redis | undefined;
   const ownerA = { userId: 'a', organizationId: 'a' };
   const ownerB = { userId: 'b', organizationId: 'b' };
   const keysA = budgetKeys(ownerA, 'active');
   const keysB = budgetKeys(ownerB, 'active');
   const admit = (client: Redis, keys: string[], id: string, units = 1, ttl = 1000) => client.eval(RESERVE, 3, ...keys, id, ttl, units, 2, 2, 4);
   beforeAll(async () => {
+    oldUrl = process.env.REDIS_URL;
     directory = await mkdtemp(join(tmpdir(), 'mailhub-work-'));
     socket = join(directory, 'redis.sock');
+    process.env.REDIS_URL = socket;
     server = spawn(process.env.WORKLOAD_TEST_REDIS_SERVER!, ['--port', '0', '--unixsocket', socket, '--save', '', '--appendonly', 'no'], { stdio: ['ignore', 'pipe', 'pipe'] });
     await new Promise<void>((resolve, reject) => {
       const deadline = setTimeout(() => reject(new Error('Redis fixture startup timed out')), 10000);
@@ -38,15 +42,14 @@ integration('distributed workload admission with disposable Redis', () => {
       server.stdout!.on('data', data => { if (/ready to accept connections/i.test(String(data))) { clearTimeout(deadline); resolve(); } });
       server.once('exit', code => reject(new Error(`Fixture Redis exited: ${code}`)));
     });
-    oldUrl = process.env.REDIS_URL;
-    process.env.REDIS_URL = socket;
     a = new Redis(socket); b = new Redis(socket);
     await Promise.all([a.ping(), b.ping()]);
+    admissionClient = await admissionRedis();
   }, 15000);
   beforeEach(async () => { await a.flushdb(); }); // only this private socket instance
   afterAll(async () => {
     server?.kill('SIGCONT');
-    (await admissionRedis()).disconnect();
+    admissionClient?.disconnect();
     await Promise.all([a?.quit(), b?.quit()]);
     server?.kill();
     if (oldUrl === undefined) delete process.env.REDIS_URL;
@@ -54,6 +57,33 @@ integration('distributed workload admission with disposable Redis', () => {
     if (directory) await rm(directory, { recursive: true, force: true });
   });
 
+  test('attachment response consumers retain shared capacity and stop on remote lease loss', async () => {
+    const fixture = async () => ({ content: Buffer.alloc(150000, 7), filename: 'synthetic', contentType: 'application/octet-stream', sizeBytes: 150000 });
+    const response = await attachmentResponse(ownerA, new AbortController().signal, fixture, () => ({}));
+    const slow = await attachmentResponse(ownerA, new AbortController().signal, fixture, () => ({}));
+    const deniedRead = jest.fn(fixture);
+    await expect(attachmentResponse(ownerA, new AbortController().signal, deniedRead, () => ({}))).rejects.toBeInstanceOf(AdmissionError);
+    expect(deniedRead).not.toHaveBeenCalled();
+    // A separate Redis client sees the leases while neither body is consumed.
+    expect(await b.zcard(keysA[0])).toBe(2);
+    const other = await attachmentResponse(ownerB, new AbortController().signal, fixture, () => ({}));
+    const reader = response.body!.getReader();
+    expect((await withoutWorkLease(() => reader.read())).value).toHaveLength(65536);
+    expect(await b.zcard(keysA[0])).toBe(2);
+    await b.del(...keysA); // independent process revokes ownership
+    await expect(withoutWorkLease(() => reader.read())).rejects.toBeInstanceOf(AdmissionError);
+    await slow.body!.cancel();
+    await other.body!.cancel();
+    const until = Date.now() + 2000;
+    while (await b.zcard(keysB[0])) {
+      if (Date.now() > until) throw new Error('response cleanup deadline');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const timed = await attachmentResponse(ownerB, new AbortController().signal, fixture, () => ({}), 30);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await expect(timed.arrayBuffer()).rejects.toThrow();
+    expect(await b.zcard(keysB[0])).toBe(0);
+  });
   test('atomic contention across independent clients, staged units and tenant isolation', async () => {
     const results = await Promise.all(Array.from({ length: 40 }, (_, i) => admit(i % 2 ? a : b, keysA, `a${i}`)));
     expect(results.filter(value => value === 1)).toHaveLength(2);
