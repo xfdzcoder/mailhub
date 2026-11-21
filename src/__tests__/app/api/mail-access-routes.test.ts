@@ -103,7 +103,7 @@ describe('mail content account access', () => {
     (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValue({ id: 'shared-account' });
     (prisma.email.findFirst as jest.Mock).mockResolvedValue({ id: 'email-1' });
     (prisma.attachment.findUnique as jest.Mock).mockResolvedValue({ id: 'att-1', emailId: 'email-1', storagePath: '/synthetic' });
-    (readStoredAttachment as jest.Mock).mockResolvedValue({ content: Buffer.from('fixture') });
+    (getReceivedAttachment as jest.Mock).mockResolvedValue({ content: Buffer.from('fixture') });
     const response = await getAttachment(new Request('http://localhost/attachment') as NextRequest, {
       params: Promise.resolve({ id: accountId, emailId: 'email-1', attachmentId: 'att-1' }),
     });
@@ -123,6 +123,29 @@ describe('mail content account access', () => {
     expect(response.status).toBe(unavailable ? 503 : 429);
     expect(await response.text()).not.toMatch(/redis|private/);
     expect(readStoredAttachment).not.toHaveBeenCalled();
+    expect(getReceivedAttachment).not.toHaveBeenCalled();
+  });
+
+  it.each(['all', 'new-emails', 'shared-account'])('rejects an inaccessible %s email before content admission', async id => {
+    (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValue({ id });
+    (prisma.email.findFirst as jest.Mock).mockResolvedValue(null);
+    const response = await getAttachment(new Request('http://localhost/attachment') as NextRequest, {
+      params: Promise.resolve({ id, emailId: 'hidden', attachmentId: 'att' }),
+    });
+    expect(response.status).toBe(404);
+    expect(prisma.attachment.findUnique).not.toHaveBeenCalled();
+    expect(mockAdmissionEval).not.toHaveBeenCalled();
+    expect(getReceivedAttachment).not.toHaveBeenCalled();
+  });
+
+  it('rejects attachments belonging to another email before content admission', async () => {
+    (prisma.email.findFirst as jest.Mock).mockResolvedValue({ id: 'email-1' });
+    (prisma.attachment.findUnique as jest.Mock).mockResolvedValue({ id: 'att', emailId: 'other-email', storagePath: '/synthetic' });
+    const response = await getAttachment(new Request('http://localhost/attachment') as NextRequest, {
+      params: Promise.resolve({ id: 'all', emailId: 'email-1', attachmentId: 'att' }),
+    });
+    expect(response.status).toBe(404);
+    expect(mockAdmissionEval).not.toHaveBeenCalled();
     expect(getReceivedAttachment).not.toHaveBeenCalled();
   });
 
@@ -175,7 +198,7 @@ describe('mail content account access', () => {
       sizeBytes: 99,
       storagePath: '.storage/attachments/att-1',
     });
-    (readStoredAttachment as jest.Mock).mockResolvedValue({
+    (getReceivedAttachment as jest.Mock).mockResolvedValue({
       filename: 'report.pdf',
       contentType: 'application/pdf',
       sizeBytes: 3,
@@ -196,14 +219,8 @@ describe('mail content account access', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Length')).toBe('3');
     expect(await response.text()).toBe('pdf');
-    expect(readStoredAttachment).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'att-1',
-        emailId: 'email-1',
-        storagePath: '.storage/attachments/att-1',
-      }),
-      expect.any(AbortSignal)
-    );
+    expect(getReceivedAttachment).toHaveBeenCalledWith('email-1', 'att-1', expect.any(AbortSignal));
+    expect(readStoredAttachment).not.toHaveBeenCalled();
   });
 
   it('retrieves a received attachment after access is verified', async () => {
@@ -250,7 +267,7 @@ describe('mail content account access', () => {
       sizeBytes: 6,
       storagePath: '.storage/attachments/att-legacy',
     });
-    (readStoredAttachment as jest.Mock).mockResolvedValue({
+    (getReceivedAttachment as jest.Mock).mockResolvedValue({
       filename: 'legacy.pdf',
       contentType: 'application/pdf',
       sizeBytes: 6,
@@ -272,15 +289,8 @@ describe('mail content account access', () => {
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('legacy');
-    expect(readStoredAttachment).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'att-legacy',
-        emailId: 'email-legacy',
-        storagePath: '.storage/attachments/att-legacy',
-      }),
-      expect.any(AbortSignal)
-    );
-    expect(getReceivedAttachment).not.toHaveBeenCalled();
+    expect(getReceivedAttachment).toHaveBeenCalledWith('email-legacy', 'att-legacy', expect.any(AbortSignal));
+    expect(readStoredAttachment).not.toHaveBeenCalled();
   });
 
   it('returns 404 when the provider no longer has the attachment', async () => {
@@ -313,14 +323,14 @@ describe('mail content account access', () => {
     (prisma.attachment.findUnique as jest.Mock).mockResolvedValue({
       id: 'att-1', emailId: 'email-1', storagePath: 'historical-fixture',
     });
-    (readStoredAttachment as jest.Mock).mockRejectedValue(new IncomingBudgetError());
+    (getReceivedAttachment as jest.Mock).mockRejectedValue(new IncomingBudgetError());
     const response = await getAttachment(
       new Request('http://localhost/api/accounts/all/emails/email-1/attachments/att-1') as NextRequest,
       { params: Promise.resolve({ id: 'all', emailId: 'email-1', attachmentId: 'att-1' }) }
     );
     expect(response.status).toBe(413);
     expect((await response.json()).error).toMatch(/export larger historical attachments/);
-    expect(getReceivedAttachment).not.toHaveBeenCalled();
+    expect(getReceivedAttachment).toHaveBeenCalledTimes(1);
     expect(prisma.attachment.deleteMany).not.toHaveBeenCalled();
   });
 
