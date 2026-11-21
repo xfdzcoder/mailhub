@@ -1,5 +1,7 @@
+import { attachmentResponse } from '@/lib/workload/attachment-response';
+import { AdmissionError } from '@/lib/workload/admission';
 import { IncomingBudgetError } from '@/lib/email/incoming-budget';
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { authenticate, apiError } from '@/lib/auth/middleware';
 import { accountAccessWhere } from '@/lib/accounts/access';
@@ -54,23 +56,26 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   }
 
   try {
-    const retrieved = attachment.storagePath
-      ? await readStoredAttachment(attachment, req.signal)
-      : await getReceivedAttachment(email.id, attachment.id, req.signal);
-
-    const response = new NextResponse(new Uint8Array(retrieved.content));
-    response.headers.set(
-      'Content-Type',
-      retrieved.contentType || attachment.contentType || 'application/octet-stream'
+    return await attachmentResponse(
+      { userId: auth.userId, organizationId: auth.organizationId },
+      req.signal,
+      signal => attachment.storagePath
+        ? readStoredAttachment(attachment, signal)
+        : getReceivedAttachment(email.id, attachment.id, signal),
+      retrieved => ({
+        'Content-Type': retrieved.contentType || attachment.contentType || 'application/octet-stream',
+        'Content-Disposition': buildContentDisposition(retrieved.filename || attachment.filename || 'download'),
+        'Content-Length': retrieved.content.length.toString(),
+      }),
     );
-    response.headers.set(
-      'Content-Disposition',
-      buildContentDisposition(retrieved.filename || attachment.filename || 'download')
-    );
-    response.headers.set('Content-Length', retrieved.content.length.toString());
-
-    return response;
   } catch (error) {
+    if (error instanceof AdmissionError) {
+      return apiError(error.unavailable ? 'Attachment download temporarily unavailable' : 'Attachment download capacity exceeded; retry later', error.unavailable ? 503 : 429);
+    }
+    if (req.signal.aborted) return apiError('Attachment download cancelled', 408);
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      return apiError('Attachment download timed out', 504);
+    }
     console.error(error);
 
     if (error instanceof IncomingBudgetError) {

@@ -1,3 +1,5 @@
+const mockAdmissionEval = jest.fn<Promise<number>, unknown[]>(async () => 1);
+jest.mock('ioredis', () => class { on() { return this; } eval(...args: unknown[]) { return mockAdmissionEval(...args); } });
 import { IncomingBudgetError } from '@/lib/email/incoming-budget';
 jest.mock('@/lib/auth/middleware', () => ({
   authenticate: jest.fn(),
@@ -84,6 +86,7 @@ const memberAccountWhere = {
 describe('mail content account access', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAdmissionEval.mockReset().mockResolvedValue(1);
     jest.spyOn(console, 'error').mockImplementation(() => {});
     (authenticate as jest.Mock).mockResolvedValue({
       userId: 'member-1',
@@ -94,6 +97,33 @@ describe('mail content account access', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it.each(['all', 'new-emails', 'shared-account'])('charges requesting principal for %s attachment routes', async accountId => {
+    (prisma.emailAccount.findFirst as jest.Mock).mockResolvedValue({ id: 'shared-account' });
+    (prisma.email.findFirst as jest.Mock).mockResolvedValue({ id: 'email-1' });
+    (prisma.attachment.findUnique as jest.Mock).mockResolvedValue({ id: 'att-1', emailId: 'email-1', storagePath: '/synthetic' });
+    (readStoredAttachment as jest.Mock).mockResolvedValue({ content: Buffer.from('fixture') });
+    const response = await getAttachment(new Request('http://localhost/attachment') as NextRequest, {
+      params: Promise.resolve({ id: accountId, emailId: 'email-1', attachmentId: 'att-1' }),
+    });
+    expect(response.status).toBe(200);
+    const { budgetKeys } = await import('@/lib/workload/admission');
+    expect(mockAdmissionEval.mock.calls[0].slice(2, 5)).toEqual(budgetKeys({ userId: 'member-1', organizationId: 'org-1' }, 'active'));
+    expect(await response.text()).toBe('fixture');
+  });
+
+  it.each([false, true])('maps admission rejection without backend details or content reads (%s)', async unavailable => {
+    (prisma.email.findFirst as jest.Mock).mockResolvedValue({ id: 'email-1' });
+    (prisma.attachment.findUnique as jest.Mock).mockResolvedValue({ id: 'att-1', emailId: 'email-1', storagePath: '/synthetic' });
+    mockAdmissionEval.mockImplementation(async () => { if (unavailable) throw new Error('private redis address'); return 0; });
+    const response = await getAttachment(new Request('http://localhost/attachment') as NextRequest, {
+      params: Promise.resolve({ id: 'all', emailId: 'email-1', attachmentId: 'att-1' }),
+    });
+    expect(response.status).toBe(unavailable ? 503 : 429);
+    expect(await response.text()).not.toMatch(/redis|private/);
+    expect(readStoredAttachment).not.toHaveBeenCalled();
+    expect(getReceivedAttachment).not.toHaveBeenCalled();
   });
 
   it('filters unified email detail before returning or marking content read', async () => {

@@ -65,6 +65,7 @@ export async function getReceivedAttachment(
   attachmentId: string,
   signal?: AbortSignal
 ): Promise<RetrievedAttachment> {
+  signal?.throwIfAborted();
   const email = (await prisma.email.findFirst({
     where: {
       id: emailId,
@@ -96,6 +97,7 @@ export async function getReceivedAttachment(
     },
   })) as LoadedEmail | null;
 
+  signal?.throwIfAborted();
   const attachment = email?.attachments[0];
   if (!email || !attachment) {
     throw new AttachmentNotFoundError();
@@ -132,6 +134,7 @@ export async function readStoredAttachment(
   >,
   signal?: AbortSignal
 ): Promise<RetrievedAttachment> {
+  signal?.throwIfAborted();
   if (!attachment.storagePath) {
     throw new AttachmentNotFoundError();
   }
@@ -168,6 +171,7 @@ async function retrieveImapAttachment(
     const result = await withImapConnection(
       email.accountId,
       async (client) => {
+        signal?.throwIfAborted();
         const mailboxPath = LOGICAL_FOLDERS.has(email.folder)
           ? await resolveMailboxPathOn(client, email.folder, { propagateErrors: true })
           : email.folder;
@@ -176,6 +180,7 @@ async function retrieveImapAttachment(
           return null;
         }
 
+        signal?.throwIfAborted();
         const lock = await client.getMailboxLock(mailboxPath, { readOnly: true });
         try {
           const download = await readImapIncoming(client, String(email.uid), imapPart, INCOMING_LIMITS.attachment, signal);
@@ -201,7 +206,7 @@ async function retrieveImapAttachment(
           lock.release();
         }
       },
-      { propagateErrors: true }
+      { propagateErrors: true, signal }
     );
 
     if (result === null) {
@@ -229,6 +234,7 @@ async function retrieveGmailAttachment(
 
   try {
     const accessToken = await getValidAccessToken(email.accountId);
+    signal?.throwIfAborted();
     let content: Buffer;
     if (attachment.gmailAttachmentId) {
       content = await fetchGmailAttachment(

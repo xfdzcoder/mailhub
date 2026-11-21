@@ -71,3 +71,30 @@ describe('IMAP worker connection SSRF guard', () => {
     expect(ImapFlow).not.toHaveBeenCalled();
   });
 });
+
+
+describe('bounded attachment IMAP connection cancellation', () => {
+  it.each(['connect', 'operation', 'logout'])('closes a connection cancelled during %s', async phase => {
+    (prisma.emailAccount.findUnique as jest.Mock).mockResolvedValue(unsafeAccount);
+    (resolveSafeOutboundHost as jest.Mock).mockResolvedValue({ address: '203.0.113.1' });
+    const request = new AbortController();
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let stop!: (error: unknown) => void;
+    const pending = () => { entered(); return new Promise<never>((_, reject) => { stop = reject; }); };
+    const client = {
+      connect: jest.fn(phase === 'connect' ? pending : async () => {}),
+      logout: jest.fn(phase === 'logout' ? pending : async () => {}),
+      close: jest.fn(() => stop(request.signal.reason)),
+    };
+    (ImapFlow as unknown as jest.Mock).mockImplementation(() => client);
+    const operation = jest.fn(phase === 'operation' ? pending : async () => 'fixture');
+    const running = withImapConnection('account-1', operation, { signal: request.signal, propagateErrors: true });
+    await started;
+    request.abort(new Error('synthetic disconnect'));
+    if (phase === 'logout') await expect(running).resolves.toBe('fixture');
+    else await expect(running).rejects.toThrow('synthetic disconnect');
+    expect(client.close).toHaveBeenCalled();
+    if (phase === 'connect') expect(operation).not.toHaveBeenCalled();
+  });
+});
