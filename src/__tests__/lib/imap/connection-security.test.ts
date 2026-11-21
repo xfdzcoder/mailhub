@@ -98,3 +98,42 @@ describe('bounded attachment IMAP connection cancellation', () => {
     if (phase === 'connect') expect(operation).not.toHaveBeenCalled();
   });
 });
+
+describe('OAuth refresh cancellation before provider setup', () => {
+  const originalFetch = global.fetch;
+  afterEach(() => { global.fetch = originalFetch; });
+  it.each(['headers', 'body'])('prevents writes and IMAP setup during refresh %s', async phase => {
+    jest.clearAllMocks();
+    const request = new AbortController();
+    (prisma.emailAccount.findUnique as jest.Mock).mockResolvedValue({
+      ...unsafeAccount, oauthProvider: 'google', oauthAccessToken: 'synthetic',
+      oauthRefreshToken: 'synthetic', oauthTokenExpiry: new Date(0),
+    });
+    global.fetch = jest.fn(async (_url, options) => {
+      if (phase === 'headers') return new Promise<Response>((_, reject) => {
+        options!.signal!.addEventListener('abort', () => reject(new Error('synthetic')));
+        request.abort();
+      });
+      return new Response(new ReadableStream({ start() { setImmediate(() => request.abort()); } }));
+    });
+    await expect(withImapConnection('account-1', async () => 'never', { signal: request.signal }))
+      .rejects.toThrow('OAuth token refresh failed');
+    expect(prisma.emailAccount.update).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+});
+
+
+it('stops pooled Google setup on refresh failure without using the old token', async () => {
+  jest.clearAllMocks();
+  const originalFetch = global.fetch;
+  global.fetch = jest.fn(async () => new Response('synthetic-provider-secret', { status: 400 }));
+  try {
+    await expect(imapManager.initializeAccount({
+      ...unsafeAccount, oauthProvider: 'google', oauthAccessToken: 'synthetic',
+      oauthRefreshToken: 'synthetic', oauthTokenExpiry: new Date(0),
+    } as unknown as Parameters<typeof imapManager.initializeAccount>[0])).rejects.toThrow(/^OAuth token refresh failed or was cancelled$/);
+    expect(prisma.emailAccount.update).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+  } finally { global.fetch = originalFetch; }
+});
