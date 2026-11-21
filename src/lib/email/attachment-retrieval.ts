@@ -1,4 +1,5 @@
 import { readIncomingFile, readImapIncoming, IncomingBudgetError, INCOMING_LIMITS } from './incoming-budget';
+import { AdmissionError, assertWorkLease } from '@/lib/workload/admission';
 import { prisma } from '@/lib/db/prisma';
 import {
   decodeGmailBase64,
@@ -107,30 +108,41 @@ export async function getReceivedAttachment(
     try {
       return await readStoredAttachment(attachment, signal);
     } catch (error) {
-      // Older versions could persist the storage path before the file was
-      // successfully written. If the file is gone, continue with the
-      // provider reference so the attachment can be recovered on demand.
+      // Recover only missing files or empty files with a known positive size.
+      // Provider retrieval below is a single attempt in the same response scope.
       if (!(error instanceof AttachmentNotFoundError)) {
         throw error;
       }
     }
   }
 
-  if (attachment.imapPart) {
-    return retrieveImapAttachment(email, attachment, signal);
+  signal?.throwIfAborted();
+  await assertWorkLease();
+  signal?.throwIfAborted();
+  let retrieved: RetrievedAttachment;
+  // Preserve IMAP precedence; an incomplete reference is not actionable.
+  if (attachment.imapPart && email.uid && email.folder) {
+    retrieved = await retrieveImapAttachment(email, attachment, signal);
+  } else if (!attachment.imapPart && email.providerMessageId &&
+    (attachment.gmailAttachmentId || attachment.ordinal !== null)) {
+    retrieved = await retrieveGmailAttachment(email, attachment, signal);
+  } else {
+    throw new AttachmentNotFoundError();
   }
-
-  if (attachment.gmailAttachmentId || (email.providerMessageId && attachment.ordinal !== null)) {
-    return retrieveGmailAttachment(email, attachment, signal);
+  signal?.throwIfAborted();
+  await assertWorkLease();
+  signal?.throwIfAborted();
+  if (retrieved.content.length > INCOMING_LIMITS.attachment) throw new IncomingBudgetError();
+  if (retrieved.content.length === 0 && (attachment.sizeBytes ?? 0) > 0) {
+    throw new AttachmentNotFoundError();
   }
-
-  throw new AttachmentNotFoundError();
+  return retrieved;
 }
 
 export async function readStoredAttachment(
   attachment: Pick<
     LoadedAttachment,
-    'filename' | 'contentType' | 'storagePath'
+    'filename' | 'contentType' | 'storagePath' | 'sizeBytes'
   >,
   signal?: AbortSignal
 ): Promise<RetrievedAttachment> {
@@ -139,6 +151,8 @@ export async function readStoredAttachment(
     throw new AttachmentNotFoundError();
   }
 
+  await assertWorkLease();
+  signal?.throwIfAborted();
   let content: Buffer;
   try {
     content = await readIncomingFile(attachment.storagePath, signal);
@@ -149,6 +163,12 @@ export async function readStoredAttachment(
     throw error;
   }
 
+  signal?.throwIfAborted();
+  await assertWorkLease();
+  signal?.throwIfAborted();
+  if (content.length === 0 && (attachment.sizeBytes ?? 0) > 0) {
+    throw new AttachmentNotFoundError();
+  }
   return {
     filename: attachment.filename ?? DEFAULT_FILENAME,
     contentType: attachment.contentType ?? DEFAULT_CONTENT_TYPE,
@@ -215,7 +235,8 @@ async function retrieveImapAttachment(
 
     return result;
   } catch (error) {
-    if (error instanceof AttachmentNotFoundError || error instanceof IncomingBudgetError) {
+    signal?.throwIfAborted();
+    if (error instanceof AttachmentNotFoundError || error instanceof IncomingBudgetError || error instanceof AdmissionError) {
       throw error;
     }
 
@@ -259,7 +280,8 @@ async function retrieveGmailAttachment(
       content,
     };
   } catch (error) {
-    if (error instanceof IncomingBudgetError || error instanceof AttachmentNotFoundError) throw error;
+    signal?.throwIfAborted();
+    if (error instanceof IncomingBudgetError || error instanceof AttachmentNotFoundError || error instanceof AdmissionError) throw error;
     if (error instanceof GmailApiError && error.status === 404) {
       throw new AttachmentNotFoundError();
     }

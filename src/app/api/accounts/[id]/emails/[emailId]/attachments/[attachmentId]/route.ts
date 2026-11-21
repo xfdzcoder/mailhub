@@ -9,7 +9,6 @@ import {
   AttachmentNotFoundError,
   AttachmentProviderError,
   getReceivedAttachment,
-  readStoredAttachment,
 } from '@/lib/email/attachment-retrieval';
 
 interface RouteParams {
@@ -59,9 +58,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     return await attachmentResponse(
       { userId: auth.userId, organizationId: auth.organizationId },
       req.signal,
-      signal => attachment.storagePath
-        ? readStoredAttachment(attachment, signal)
-        : getReceivedAttachment(email.id, attachment.id, signal),
+      signal => getReceivedAttachment(email.id, attachment.id, signal),
       retrieved => ({
         'Content-Type': retrieved.contentType || attachment.contentType || 'application/octet-stream',
         'Content-Disposition': buildContentDisposition(retrieved.filename || attachment.filename || 'download'),

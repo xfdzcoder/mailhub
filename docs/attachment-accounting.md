@@ -92,3 +92,31 @@ rows and a shared file, repeat deploy, uniqueness and size constraints, retentio
 of accounting evidence after account deletion, and schema rollback. The application
 schema and its synthetic file survived upgrade and rollback. Also verified deployment
 after the credential storage migration already ran on the database.
+
+## Read-only stale-cache recovery (#84)
+
+Authorized attachment GET requests use `getReceivedAttachment` inside the existing
+requester-attributed response admission scope. A missing local file, or an actual
+zero-byte local file whose recorded `sizeBytes` is positive, can fall back to one
+actionable IMAP/Gmail reference. Local-only missing/invalid-empty files and known
+positive-size empty provider results return not-found. Zero or unknown recorded
+sizes preserve empty local content; other size mismatches are not corruption
+checks. Recovery does not write files, update paths, or change accounting.
+
+The original response signal, lease, fixed deadline, and actual-byte 20 MiB limit
+also cover fallback. Non-ENOENT I/O errors, provider errors, cancellation, admission
+loss, and byte-limit failures do not trigger another provider attempt.
+
+Validation used Node 24.22.3 and synthetic data only. The route bypass regression
+failed against the old route and passed after unifying retrieval. Lint, TypeScript,
+production build, tooling compatibility tests, and all 129 enabled Jest suites
+passed (964 tests; 24 opt-in tests skipped). This included the disposable Redis
+admission suite using a locally built Redis 7.2.6 with persistence disabled and a
+temporary Unix socket; PostgreSQL-dependent opt-in suites were not enabled.
+Security scanner/image gate unit tests passed (14 tests). The standard browser
+checks were attempted after installing Playwright Chromium, but all four were
+blocked at browser launch by missing system libraries (`libglib-2.0.so.0`).
+Source/runtime/migrate scan commands were attempted and blocked by missing Trivy;
+Docker is also unavailable for container smoke/migration checks. These existing
+release gates remain required in CI; no gate or exception was changed. No operator
+credentials, data, or services were used. This backend change has no visual preview.
