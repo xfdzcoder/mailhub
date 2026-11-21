@@ -1,3 +1,4 @@
+import { exchangeOAuthToken, assertTokenWork } from '@/lib/oauth/token-exchange';
 import { assertWorkLease, withoutWorkLease } from '@/lib/workload/admission';
 import { withWork } from '@/lib/workload/admission';
 import { accountWorkOwner } from '@/lib/workload/ownership';
@@ -50,8 +51,10 @@ const IMAP_RECONCILIATION_OVERLAP_MS = 24 * 60 * 60 * 1000;
  * API routes open, so both handle password *and* OAuth (Microsoft/Google) auth.
  */
 export async function resolveImapCredentials(
-  account: EmailAccount
+  account: EmailAccount,
+  signal?: AbortSignal
 ): Promise<{ password: string | null; accessToken: string | null }> {
+  await assertTokenWork(signal);
   const password = account.passwordEncrypted ? decrypt(account.passwordEncrypted) : null;
   let accessToken = account.oauthAccessToken ? decrypt(account.oauthAccessToken) : null;
 
@@ -79,43 +82,25 @@ export async function resolveImapCredentials(
         : process.env.GOOGLE_CLIENT_SECRET;
 
     if (endpoint) {
-      try {
-        console.log(`Refreshing ${account.oauthProvider} OAuth token for account ${account.id}`);
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: clientId || '',
-            client_secret: clientSecret || '',
-            refresh_token: refreshToken,
-            grant_type: 'refresh_token',
-          }),
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          const updateData: Prisma.EmailAccountUpdateInput = {
-            oauthAccessToken: encrypt(data.access_token),
-            oauthTokenExpiry: new Date(Date.now() + data.expires_in * 1000),
-          };
-          if (data.refresh_token) {
-            updateData.oauthRefreshToken = encrypt(data.refresh_token);
-          }
-
-          await prisma.emailAccount.update({ where: { id: account.id }, data: updateData });
-          accessToken = data.access_token;
-          console.log(`Successfully refreshed OAuth token for account ${account.id}`);
-        } else {
-          console.error(
-            `Failed to refresh ${account.oauthProvider} token: ${await res.text()}`
-          );
-        }
-      } catch (error) {
-        console.error(`Error refreshing OAuth token for account ${account.id}:`, error);
-      }
+      const { data, assertActive } = await exchangeOAuthToken(endpoint, {
+        client_id: clientId || '',
+        client_secret: clientSecret || '',
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }, signal);
+      const updateData: Prisma.EmailAccountUpdateInput = {
+        oauthAccessToken: encrypt(data.access_token),
+        oauthTokenExpiry: new Date(Date.now() + data.expires_in * 1000),
+      };
+      if (data.refresh_token) updateData.oauthRefreshToken = encrypt(data.refresh_token);
+      await assertActive();
+      await prisma.emailAccount.update({ where: { id: account.id }, data: updateData });
+      await assertActive();
+      accessToken = data.access_token;
     }
   }
 
+  await assertTokenWork(signal);
   return { password, accessToken };
 }
 
@@ -138,7 +123,7 @@ export async function withImapConnection<T>(
   const account = await prisma.emailAccount.findUnique({ where: { id: accountId } });
   if (!account) return null;
 
-  const { password, accessToken } = await resolveImapCredentials(account);
+  const { password, accessToken } = await resolveImapCredentials(account, options.signal);
 
   if (!account.imapHost || (!password && !accessToken)) {
     console.warn(`Account ${accountId} has no usable IMAP credentials.`);
@@ -156,6 +141,7 @@ export async function withImapConnection<T>(
   const abort = () => client?.close();
   try {
     const destination = await resolveSafeOutboundHost(account.imapHost);
+    await assertTokenWork(options.signal);
     client = new ImapFlow({
       ...IMAP_RESPONSE_LIMITS,
       host: destination.address,
@@ -513,80 +499,19 @@ export class IMAPConnectionManager {
       await this.disposeConnectionEntry(account.id, staleEntry);
     }
 
-    const password = account.passwordEncrypted
-      ? decrypt(account.passwordEncrypted)
-      : null;
-
-    let accessToken = account.oauthAccessToken
-      ? decrypt(account.oauthAccessToken)
-      : null;
-
+    let credentials;
     if (account.oauthRefreshToken && (account.oauthProvider === 'microsoft' || account.provider === 'outlook')) {
-      try {
-        const { getValidOAuthAccessToken } = await import('@/lib/accounts/tokens');
-        accessToken = await getValidOAuthAccessToken(
-          account.id,
-          'https://outlook.office.com/IMAP.AccessAsUser.All offline_access'
-        );
-      } catch (tokenErr) {
-        console.error(`Failed to acquire Microsoft IMAP access token for account ${account.id}:`, tokenErr);
-      }
-    } else if (accessToken && account.oauthTokenExpiry) {
-      const now = new Date();
-      if (account.oauthTokenExpiry < new Date(now.getTime() + 5 * 60000)) {
-        if (account.oauthRefreshToken) {
-          const refreshToken = decrypt(account.oauthRefreshToken);
-          try {
-            let newAccessToken: string | null = null;
-            let newExpiry: Date | null = null;
-            let newRefreshToken: string | null = null;
-
-            if (account.oauthProvider === 'google') {
-              console.log(`Refreshing Google OAuth token for account ${account.id}`);
-              const res = await fetch('https://oauth2.googleapis.com/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                  client_id: process.env.GOOGLE_CLIENT_ID || '',
-                  client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
-                  refresh_token: refreshToken,
-                  grant_type: 'refresh_token',
-                }),
-              });
-
-              if (res.ok) {
-                const data = await res.json();
-                newAccessToken = data.access_token;
-                newExpiry = new Date(Date.now() + (data.expires_in * 1000));
-                if (data.refresh_token) newRefreshToken = data.refresh_token;
-              } else {
-                console.error(`Failed to refresh Google token: ${await res.text()}`);
-              }
-            }
-
-            if (newAccessToken && newExpiry) {
-              const updateData: Prisma.EmailAccountUpdateInput = {
-                oauthAccessToken: encrypt(newAccessToken),
-                oauthTokenExpiry: newExpiry,
-              };
-              if (newRefreshToken) {
-                updateData.oauthRefreshToken = encrypt(newRefreshToken);
-              }
-
-              await prisma.emailAccount.update({
-                where: { id: account.id },
-                data: updateData
-              });
-
-              accessToken = newAccessToken;
-              console.log(`Successfully refreshed OAuth token for account ${account.id}`);
-            }
-          } catch (error) {
-            console.error(`Error refreshing OAuth token for account ${account.id}:`, error);
-          }
-        }
-      }
+      const { getValidOAuthAccessToken } = await import('@/lib/accounts/tokens');
+      credentials = {
+        password: account.passwordEncrypted ? decrypt(account.passwordEncrypted) : null,
+        accessToken: await getValidOAuthAccessToken(
+          account.id, 'https://outlook.office.com/IMAP.AccessAsUser.All offline_access'
+        ),
+      };
+    } else {
+      credentials = await resolveImapCredentials(account);
     }
+    const { password, accessToken } = credentials;
 
     if (!account.imapHost || (!password && !accessToken)) {
       console.warn(`Account ${account.id} missing IMAP credentials, skipping`);
@@ -604,6 +529,7 @@ export class IMAPConnectionManager {
       auth.pass = password;
     }
 
+    await assertTokenWork();
     const client = new ImapFlow({
       ...IMAP_RESPONSE_LIMITS,
       host: destination.address,

@@ -1,3 +1,4 @@
+import { exchangeOAuthToken, assertTokenWork } from '@/lib/oauth/token-exchange';
 import { prisma } from '@/lib/db/prisma';
 import { encrypt, decrypt } from '@/lib/crypto';
 import type { Prisma } from '@prisma/client';
@@ -6,7 +7,8 @@ import type { Prisma } from '@prisma/client';
  * Retrieves a valid OAuth access token for a given account ID (Gmail or Outlook/Microsoft).
  * Automatically refreshes the token using the refresh token if it is expired or near expiration.
  */
-export async function getValidOAuthAccessToken(accountId: string, scope?: string): Promise<string> {
+export async function getValidOAuthAccessToken(accountId: string, scope?: string, signal?: AbortSignal): Promise<string> {
+  await assertTokenWork(signal);
   const account = await prisma.emailAccount.findUnique({
     where: { id: accountId },
   });
@@ -20,6 +22,7 @@ export async function getValidOAuthAccessToken(accountId: string, scope?: string
 
   // If token is still valid (1 minute buffer) and no custom scope requested, return decrypted token
   if (!scope && account.oauthTokenExpiry && account.oauthTokenExpiry > new Date(now.getTime() + 60000)) {
+    await assertTokenWork(signal);
     return decrypt(account.oauthAccessToken);
   }
 
@@ -53,18 +56,7 @@ export async function getValidOAuthAccessToken(accountId: string, scope?: string
     params.scope = scope;
   }
 
-  const res = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(params),
-  });
-
-  if (!res.ok) {
-    const errorText = await res.text().catch(() => '');
-    throw new Error(`Failed to refresh ${isMicrosoft ? 'Microsoft' : 'Google'} OAuth token: ${errorText}`);
-  }
-
-  const data = await res.json();
+  const { data, assertActive } = await exchangeOAuthToken(tokenUrl, params, signal);
   const newAccessToken = data.access_token;
   const newExpiry = new Date(Date.now() + (data.expires_in * 1000));
 
@@ -77,10 +69,12 @@ export async function getValidOAuthAccessToken(accountId: string, scope?: string
     updateData.oauthRefreshToken = encrypt(data.refresh_token);
   }
 
+  await assertActive();
   await prisma.emailAccount.update({
     where: { id: accountId },
     data: updateData,
   });
 
+  await assertActive();
   return newAccessToken;
 }
